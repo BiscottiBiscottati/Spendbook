@@ -24,6 +24,8 @@ const SOURCE_LABELS = Object.freeze({
     unavailable: 'unavailable',
 });
 
+const RETENTION_LIMIT = 500;
+
 /**
  * Turns ledger records and observer state into the labels the drawer renders.
  *
@@ -31,19 +33,94 @@ const SOURCE_LABELS = Object.freeze({
  * @param {object[]} [options.records] Newest-first records for the active chat.
  * @param {boolean} [options.trackingEnabled] Whether the observer is capturing.
  * @param {object|null} [options.health] Observer health counters, when installed.
- * @returns {{empty: boolean, emptyMessage: string, trackingEnabled: boolean, health: {state: string, label: string}, rows: object[]}}
+ * @param {{limit: number, retained: number, total: number}|null} [options.retention] Row counts for the active chat.
+ * @param {{totals: object, chats: number}|null} [options.allTime] Cross-chat aggregate.
+ * @returns {object}
  */
-export function buildUsageView({ records = [], trackingEnabled = false, health = null } = {}) {
+export function buildUsageView({
+    records = [],
+    trackingEnabled = false,
+    health = null,
+    retention = null,
+    allTime = null,
+} = {}) {
     const rows = (Array.isArray(records) ? records : []).map(buildRow);
 
     return {
         trackingEnabled,
         health: describeObserverHealth({ trackingEnabled, health }),
+        retention: describeRetention(retention),
+        allTime: describeAllTime(allTime),
         empty: rows.length === 0,
         emptyMessage: trackingEnabled
             ? 'No requests recorded yet. Send a message with tracking on to start the table.'
             : 'Tracking is off. Turn on tracking to record requests in this chat.',
         rows,
+    };
+}
+
+/**
+ * The retention note: how many rows the table holds and how many older rows
+ * the counters include after the cap folded them.
+ *
+ * @param {{limit?: number, retained?: number, total?: number}|null} [retention]
+ * @returns {{limit: number, retained: number, total: number, folded: number, label: string}}
+ */
+export function describeRetention(retention = {}) {
+    const limit = toCount(retention?.limit) || RETENTION_LIMIT;
+    const retained = toCount(retention?.retained);
+    const total = Math.max(retained, toCount(retention?.total));
+    const folded = total - retained;
+
+    if (total === 0) {
+        return {
+            limit,
+            retained,
+            total,
+            folded,
+            label: `Retention: the newest ${formatCount(limit)} requests are kept per chat.`,
+        };
+    }
+    if (folded > 0) {
+        return {
+            limit,
+            retained,
+            total,
+            folded,
+            label: `Retention: showing the newest ${formatCount(retained)} of ${formatCount(total)} requests — ${formatCount(folded)} older rows are folded into the totals.`,
+        };
+    }
+    return {
+        limit,
+        retained,
+        total,
+        folded,
+        label: `Retention: ${formatCount(retained)} of up to ${formatCount(limit)} requests kept — nothing is folded into the totals yet.`,
+    };
+}
+
+/**
+ * The all-time line: completed and excluded requests across every chat whose
+ * bucket local storage still holds.
+ *
+ * @param {{totals?: object, chats?: number}|null} [allTime]
+ * @returns {{requests: number, excluded: number, chats: number, label: string}}
+ */
+export function describeAllTime(allTime = {}) {
+    const requests = toCount(allTime?.totals?.requests);
+    const excluded = toCount(allTime?.totals?.excludedRequests);
+    const chats = toCount(allTime?.chats);
+
+    if (requests + excluded === 0 || chats === 0) {
+        return { requests: 0, excluded: 0, chats: 0, label: 'All time: no requests recorded yet.' };
+    }
+
+    const stopped = excluded > 0 ? ` and ${formatCount(excluded)} failed or stopped` : '';
+    return {
+        requests,
+        excluded,
+        chats,
+        label: `All time: ${formatCount(requests)} completed request${requests === 1 ? '' : 's'}${stopped}, across ${formatCount(chats)} chat${chats === 1 ? '' : 's'}.`,
     };
 }
 
@@ -128,4 +205,8 @@ function formatCount(value) {
 
 function formatCountLabel(count, noun) {
     return `${NUMBER_FORMAT.format(count)} ${noun}${count === 1 ? '' : 's'}`;
+}
+
+function toCount(value) {
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }

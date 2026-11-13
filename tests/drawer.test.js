@@ -15,10 +15,26 @@ import { readSpendbookSettings, setTrackingEnabled } from '../src/settings.js';
 
 const templateHtml = readFileSync(join(process.cwd(), 'settings.html'), 'utf8');
 
-function mount({ settings = {}, onTrackingChange = () => {}, getSnapshot = null } = {}) {
+function mount({
+    settings = {},
+    onTrackingChange = () => {},
+    getSnapshot = null,
+    onResetChat = () => {},
+    onResetAllTime = () => {},
+    confirmReset = () => true,
+} = {}) {
     document.body.innerHTML = '<div id="extensions_settings2"></div>';
     const container = document.getElementById('extensions_settings2');
-    const panel = mountSpendbookPanel({ container, html: templateHtml, settings, onTrackingChange, getSnapshot });
+    const panel = mountSpendbookPanel({
+        container,
+        html: templateHtml,
+        settings,
+        onTrackingChange,
+        getSnapshot,
+        onResetChat,
+        onResetAllTime,
+        confirmReset,
+    });
     return { container, panel };
 }
 
@@ -228,5 +244,127 @@ describe('Spendbook drawer table', () => {
 
         expect(container.querySelectorAll('.spendbook-rows tr')).toHaveLength(1);
         expect(container.querySelector('.spendbook-table').hidden).toBe(false);
+    });
+});
+
+describe('Spendbook drawer — retention and all-time', () => {
+    beforeEach(() => {
+        document.body.innerHTML = '';
+    });
+
+    it('shows how many rows are retained and how many are folded into the totals', () => {
+        const { container } = mount({
+            settings: { trackingEnabled: true },
+            getSnapshot: () => ({
+                records: [row()],
+                trackingEnabled: true,
+                health: { captured: 1204 },
+                retention: { limit: 500, retained: 500, total: 1204 },
+            }),
+        });
+
+        expect(container.querySelector('.spendbook-retention').textContent).toBe(
+            'Retention: showing the newest 500 of 1,204 requests — 704 older rows are folded into the totals.',
+        );
+    });
+
+    it('says nothing is folded when the chat is under the cap', () => {
+        const { container } = mount({
+            settings: { trackingEnabled: true },
+            getSnapshot: () => ({
+                records: [row()],
+                trackingEnabled: true,
+                health: { captured: 12 },
+                retention: { limit: 500, retained: 12, total: 12 },
+            }),
+        });
+
+        expect(container.querySelector('.spendbook-retention').textContent).toBe(
+            'Retention: 12 of up to 500 requests kept — nothing is folded into the totals yet.',
+        );
+    });
+
+    it('shows the all-time summary across chats', () => {
+        const { container } = mount({
+            settings: { trackingEnabled: true },
+            getSnapshot: () => ({
+                records: [row()],
+                trackingEnabled: true,
+                health: { captured: 1 },
+                allTime: { totals: { requests: 1204, excludedRequests: 12 }, chats: 3 },
+            }),
+        });
+
+        expect(container.querySelector('.spendbook-alltime').textContent).toBe(
+            'All time: 1,204 completed requests and 12 failed or stopped, across 3 chats.',
+        );
+    });
+
+    it('shows the all-time summary before anything has been recorded', () => {
+        const { container } = mount({
+            settings: { trackingEnabled: true },
+            getSnapshot: () => ({
+                records: [],
+                trackingEnabled: true,
+                health: { captured: 0 },
+                allTime: { totals: { requests: 0, excludedRequests: 0 }, chats: 0 },
+            }),
+        });
+
+        expect(container.querySelector('.spendbook-alltime').textContent).toBe(
+            'All time: no requests recorded yet.',
+        );
+    });
+});
+
+describe('Spendbook drawer — reset actions', () => {
+    beforeEach(() => {
+        document.body.innerHTML = '';
+    });
+
+    it('asks before resetting this chat, and does nothing when declined', () => {
+        const onResetChat = vi.fn();
+        const confirmReset = vi.fn(() => false);
+        const { container } = mount({ settings: { trackingEnabled: true }, onResetChat, confirmReset });
+
+        container.querySelector('.spendbook-reset-chat').click();
+
+        expect(confirmReset).toHaveBeenCalledTimes(1);
+        expect(confirmReset.mock.calls[0][0]).toMatch(/this chat/i);
+        expect(onResetChat).not.toHaveBeenCalled();
+    });
+
+    it('resets this chat only after confirmation, and leaves all-time alone', () => {
+        const onResetChat = vi.fn();
+        const onResetAllTime = vi.fn();
+        const { container } = mount({
+            settings: { trackingEnabled: true },
+            onResetChat,
+            onResetAllTime,
+            confirmReset: () => true,
+        });
+
+        container.querySelector('.spendbook-reset-chat').click();
+
+        expect(onResetChat).toHaveBeenCalledTimes(1);
+        expect(onResetAllTime).not.toHaveBeenCalled();
+    });
+
+    it('asks before resetting all time, and resets only the cross-chat totals', () => {
+        const onResetChat = vi.fn();
+        const onResetAllTime = vi.fn();
+        const confirmReset = vi.fn(() => true);
+        const { container } = mount({
+            settings: { trackingEnabled: true },
+            onResetChat,
+            onResetAllTime,
+            confirmReset,
+        });
+
+        container.querySelector('.spendbook-reset-alltime').click();
+
+        expect(confirmReset.mock.calls[0][0]).toMatch(/all-time/i);
+        expect(onResetAllTime).toHaveBeenCalledTimes(1);
+        expect(onResetChat).not.toHaveBeenCalled();
     });
 });

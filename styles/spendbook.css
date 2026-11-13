@@ -16,6 +16,26 @@
     font-size: 0.9em;
 }
 
+.spendbook-alltime,
+.spendbook-retention {
+    margin: 6px 0;
+    color: var(--SmartThemeEmColor);
+    font-size: 0.9em;
+}
+
+.spendbook-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+/* ST's .menu_button is min-content wide for icon buttons; these carry words. */
+.spendbook-actions .menu_button {
+    width: auto;
+    margin: 4px 0;
+    white-space: nowrap;
+}
+
 .spendbook-empty {
     padding: 8px 0;
     color: var(--SmartThemeEmColor);

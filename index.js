@@ -9,6 +9,7 @@
 
 import { eventSource, event_types, saveMetadata, saveSettingsDebounced } from '../../../../script.js';
 import { extension_settings, getContext, renderExtensionTemplateAsync } from '../../../extensions.js';
+import { getSanitizedFilename } from '../../../utils.js';
 import { readSpendbookSettings, setTrackingEnabled } from './src/settings.js';
 import { UsageLedger } from './src/ledger.js';
 import { createPromptTokenEstimator } from './src/estimator.js';
@@ -22,10 +23,22 @@ const getChatId = () => getContext()?.chatId ?? null;
 const getMetadata = () => getContext()?.chatMetadata ?? null;
 const readSettings = () => readSpendbookSettings(extension_settings);
 
+// Local storage is optional: a disabled store loses the all-time totals and the
+// debounce backup, never the capture.
+function readLocalStorage() {
+    try {
+        return globalThis.localStorage ?? null;
+    } catch {
+        return null;
+    }
+}
+
 const ledger = new UsageLedger({
     getChatId,
     getMetadata,
     saveMetadata: () => saveMetadata(),
+    storage: readLocalStorage(),
+    sanitizeChatFileName: getSanitizedFilename,
 });
 
 // Prompt-token estimate for providers that omit usage. The tokenizer is
@@ -37,6 +50,11 @@ const estimatePromptTokens = createPromptTokenEstimator({
 
 let refreshPanel = () => {};
 let generationStateBound = false;
+// The chat open before the last CHAT_CHANGED and the one open now. A rename of
+// the open chat reloads it under its new server-sanitized id before the event
+// fires, so these two ids are how the ledger recognises that case.
+let previousChatId = null;
+let activeChatId = null;
 
 function bindGenerationState() {
     if (generationStateBound) return;
@@ -85,24 +103,68 @@ async function mountSettingsDrawer() {
             records: ledger.recordsFor(getChatId()),
             trackingEnabled: readSettings().trackingEnabled,
             health: getUsageObserverHealth(),
+            retention: ledger.retentionFor(getChatId()),
+            allTime: ledger.allTimeForView(),
         }),
         onTrackingChange: (trackingEnabled) => {
             setTrackingEnabled(extension_settings, trackingEnabled);
             saveSettingsDebounced();
             if (trackingEnabled) installObserver();
         },
+        onResetChat: () => {
+            const chatId = getChatId();
+            if (chatId == null) return;
+            ledger.resetChat(chatId);
+            refreshPanel();
+        },
+        onResetAllTime: () => {
+            ledger.resetAllTime();
+            refreshPanel();
+        },
     });
     refreshPanel = panel.refresh;
+}
+
+/**
+ * Follow SillyTavern's chat lifecycle even while tracking is off: the all-time
+ * aggregate must lose a deleted chat's bucket, follow a rename, and replay a
+ * pending row when a chat is opened again.
+ */
+function bindChatLifecycle() {
+    activeChatId = getChatId();
+
+    eventSource.on(event_types.CHAT_CHANGED, () => {
+        previousChatId = activeChatId;
+        activeChatId = getChatId();
+        ledger.handleChatChanged(activeChatId);
+        refreshPanel();
+    });
+
+    const handleChatDeleted = (deletedChatId) => {
+        ledger.handleChatDeleted(deletedChatId ?? null);
+        refreshPanel();
+    };
+    eventSource.on(event_types.CHAT_DELETED, handleChatDeleted);
+    eventSource.on(event_types.GROUP_CHAT_DELETED, handleChatDeleted);
+
+    eventSource.on(event_types.CHAT_RENAMED, async (eventData) => {
+        // The ledger strips SillyTavern's `.jsonl` file names back to chat ids
+        // and asks the server how it sanitized a name it has not reloaded.
+        await ledger.handleChatRenamed(eventData?.oldFileName, eventData?.newFileName, {
+            previousChatId,
+            currentChatId: activeChatId,
+        });
+        refreshPanel();
+    });
+
+    globalThis.addEventListener('pagehide', () => ledger.flush());
 }
 
 jQuery(async () => {
     try {
         // Bind before the async mount: SillyTavern can restore the open chat
         // while the template is still loading, and that switch must be seen.
-        eventSource.on(event_types.CHAT_CHANGED, () => {
-            ledger.handleChatChanged(getChatId());
-            refreshPanel();
-        });
+        bindChatLifecycle();
 
         if (readSettings().trackingEnabled) installObserver();
         ledger.loadChat(getChatId());

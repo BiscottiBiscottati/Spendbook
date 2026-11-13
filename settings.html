@@ -12,6 +12,7 @@
         </label>
         <div class="spendbook-panel">
             <div class="spendbook-health" role="status"></div>
+            <div class="spendbook-alltime"></div>
             <div class="spendbook-empty"></div>
             <table class="spendbook-table" hidden>
                 <thead>
@@ -30,6 +31,11 @@
                 </thead>
                 <tbody class="spendbook-rows"></tbody>
             </table>
+            <div class="spendbook-retention"></div>
+        </div>
+        <div class="spendbook-actions">
+            <button type="button" class="menu_button spendbook-reset-chat">Reset this chat</button>
+            <button type="button" class="menu_button spendbook-reset-alltime">Reset all time</button>
         </div>
         <small class="spendbook-privacy-note">
             Spendbook records token counts, cost and latency for chat-completion
