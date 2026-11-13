@@ -9,17 +9,12 @@
 const PLACEHOLDER = '—';
 const NUMBER_FORMAT = new Intl.NumberFormat('en-US');
 
-const ORIGIN_LABELS = Object.freeze({
-    story: 'story',
-    quiet: 'quiet',
-    internal: 'internal',
-});
+const KNOWN_ORIGINS = new Set(['story', 'quiet', 'internal']);
 
 const STATUS_LABELS = Object.freeze({
     ok: 'ok',
     'no-usage': 'no usage',
     error: 'error',
-    aborted: 'aborted',
 });
 
 /**
@@ -82,7 +77,7 @@ function buildRow(record) {
     return {
         recordId: record.recordId ?? '',
         timeLabel: formatTime(record.timestamp),
-        originLabel: ORIGIN_LABELS[record.origin] ?? PLACEHOLDER,
+        originLabel: KNOWN_ORIGINS.has(record.origin) ? record.origin : PLACEHOLDER,
         labelLabel: record.label || PLACEHOLDER,
         providerLabel: record.provider || 'unknown',
         modelLabel: record.model || 'unknown',

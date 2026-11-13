@@ -10,7 +10,7 @@
  * is already installed passes requests through untouched.
  */
 
-import { resolveUsageOrigin } from './origin.js';
+import { resolveUsageOrigin, USAGE_ORIGINS } from './origin.js';
 
 export const USAGE_CHAT_COMPLETION_PATH = '/api/backends/chat-completions/generate';
 export const USAGE_OBSERVER_MARKER = '__spendbook_usage_observer__';
@@ -63,7 +63,7 @@ export function installUsageObserver({
         getOrigin,
         onSettle,
         now,
-        health: { matched: 0, captured: 0, skipped: 0, errors: 0 },
+        health: { matched: 0, captured: 0, errors: 0 },
     };
 
     if (target[USAGE_OBSERVER_MARKER]) return target.fetch;
@@ -123,7 +123,7 @@ export function installUsageObserver({
  * Health of the installed observer, or null when none is installed.
  *
  * @param {object} [target] Object owning fetch (window in production).
- * @returns {{matched: number, captured: number, skipped: number, errors: number}|null}
+ * @returns {{matched: number, captured: number, errors: number}|null}
  */
 export function getUsageObserverHealth(target = globalThis) {
     try {
@@ -169,7 +169,7 @@ function readOrigin(sink, init) {
     } catch {
         /* attribution must never break capture */
     }
-    return { origin: 'internal', label: null };
+    return { origin: USAGE_ORIGINS.INTERNAL, label: null };
 }
 
 /**
@@ -253,7 +253,7 @@ function isChatCompletionRequest(input) {
     if (!url) return false;
 
     try {
-        return new URL(url, 'http://localhost').pathname === USAGE_CHAT_COMPLETION_PATH;
+        return new URL(url, 'http://spendbook.test').pathname === USAGE_CHAT_COMPLETION_PATH;
     } catch {
         return false;
     }
@@ -328,7 +328,7 @@ function buildRecord({
         timestamp: startedAt,
         chatId,
         runId: typeof runId === 'string' ? runId : null,
-        origin: origin?.origin ?? 'internal',
+        origin: origin?.origin ?? USAGE_ORIGINS.INTERNAL,
         label: origin?.label ?? null,
         provider: body.chat_completion_source || 'unknown',
         model: body.model || responseModel || 'unknown',

@@ -19,17 +19,17 @@ describe('Spendbook origin attribution', () => {
 
     it('records a marked call as internal with its label, even during a story generation', () => {
         noteGenerationStarted('normal');
-        const init = { [MARK]: { label: 'Summarizer' } };
+        const init = { [MARK]: { label: 'ExampleFeature' } };
 
-        expect(resolveUsageOrigin(init)).toEqual({ origin: 'internal', label: 'Summarizer' });
+        expect(resolveUsageOrigin(init)).toEqual({ origin: 'internal', label: 'ExampleFeature' });
     });
 
     it('does not let a marked call in flight steal the story request sent during it', () => {
         noteGenerationStarted('normal');
-        const internalInit = { [MARK]: { label: 'EventBase' } };
+        const internalInit = { [MARK]: { label: 'ExampleFeature' } };
         const storyInit = {};
 
-        expect(resolveUsageOrigin(internalInit)).toEqual({ origin: 'internal', label: 'EventBase' });
+        expect(resolveUsageOrigin(internalInit)).toEqual({ origin: 'internal', label: 'ExampleFeature' });
         expect(resolveUsageOrigin(storyInit)).toEqual({ origin: 'story', label: null });
     });
 

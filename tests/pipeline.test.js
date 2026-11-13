@@ -136,13 +136,13 @@ describe('Spendbook observer pipeline', () => {
         const pipeline = createPipeline();
         noteGenerationStarted('normal');
 
-        await send(pipeline, markInternalRequest(requestInit(), 'Summarizer'));
+        await send(pipeline, markInternalRequest(requestInit(), 'ExampleFeature'));
         await send(pipeline, requestInit());
         await waitForRecords(pipeline, 2);
 
         expect(pipeline.records().map((row) => [row.origin, row.label])).toEqual([
             ['story', null],
-            ['internal', 'Summarizer'],
+            ['internal', 'ExampleFeature'],
         ]);
     });
 

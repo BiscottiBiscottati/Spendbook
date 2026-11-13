@@ -87,7 +87,7 @@ describe('Spendbook drawer table', () => {
     it('renders a row with provider, model, tokens, latency, status, origin and label', () => {
         const { container } = mount({
             settings: { trackingEnabled: true },
-            getSnapshot: () => ({ records: [row({ origin: 'internal', label: 'Summarizer' })], trackingEnabled: true, health: { matched: 1, captured: 1, errors: 0 } }),
+            getSnapshot: () => ({ records: [row({ origin: 'internal', label: 'ExampleFeature' })], trackingEnabled: true, health: { matched: 1, captured: 1, errors: 0 } }),
         });
 
         const [rendered] = container.querySelectorAll('.spendbook-rows tr');
@@ -98,7 +98,7 @@ describe('Spendbook drawer table', () => {
         expect(rendered.querySelector('.spendbook-cell-latency').textContent).toBe('820 ms');
         expect(rendered.querySelector('.spendbook-cell-status').textContent).toBe('ok');
         expect(rendered.querySelector('.spendbook-cell-origin').textContent).toBe('internal');
-        expect(rendered.querySelector('.spendbook-cell-label').textContent).toBe('Summarizer');
+        expect(rendered.querySelector('.spendbook-cell-label').textContent).toBe('ExampleFeature');
     });
 
     it('shows a placeholder, not zero, when the provider reported no token count', () => {

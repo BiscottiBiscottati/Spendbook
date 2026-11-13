@@ -89,6 +89,7 @@ describe('Spendbook ledger', () => {
         ledger.loadChat('chat-a');
 
         expect(ledger.recordsFor('chat-a')).toEqual([]);
+        expect(metadata[USAGE_CHAT_METADATA_KEY]).toBeUndefined();
     });
 
     it('tolerates a malformed persisted namespace', () => {
@@ -101,9 +102,8 @@ describe('Spendbook ledger', () => {
 
     it('follows a chat switch to the new chat’s records', () => {
         let chatId = 'chat-a';
-        const metadata = {
-            [USAGE_CHAT_METADATA_KEY]: { ownerChatId: 'chat-b', records: [record({ chatId: 'chat-b' })] },
-        };
+        // chat_metadata is per chat in SillyTavern, so each open chat has its own.
+        let metadata = {};
         const ledger = new UsageLedger({
             getChatId: () => chatId,
             getMetadata: () => metadata,
@@ -112,6 +112,9 @@ describe('Spendbook ledger', () => {
         ledger.loadChat(chatId);
 
         chatId = 'chat-b';
+        metadata = {
+            [USAGE_CHAT_METADATA_KEY]: { ownerChatId: 'chat-b', records: [record({ chatId: 'chat-b' })] },
+        };
         ledger.handleChatChanged(chatId);
 
         expect(ledger.recordsFor('chat-b').map((row) => row.recordId)).toEqual(['r-1']);

@@ -88,14 +88,19 @@ async function mountSettingsDrawer() {
 
 jQuery(async () => {
     try {
-        ledger.loadChat(getChatId());
-        if (readSettings().trackingEnabled) installObserver();
-        await mountSettingsDrawer();
-
+        // Bind before the async mount: SillyTavern can restore the open chat
+        // while the template is still loading, and that switch must be seen.
         eventSource.on(event_types.CHAT_CHANGED, () => {
             ledger.handleChatChanged(getChatId());
             refreshPanel();
         });
+
+        if (readSettings().trackingEnabled) installObserver();
+        ledger.loadChat(getChatId());
+        await mountSettingsDrawer();
+        // The chat may have been restored during the mount.
+        ledger.loadChat(getChatId());
+        refreshPanel();
     } catch (error) {
         console.error('Spendbook: failed to mount the settings drawer.', error);
     }

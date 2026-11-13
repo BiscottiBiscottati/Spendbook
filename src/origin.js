@@ -36,7 +36,7 @@ let _generation = null;
  * so it never reaches the wire and never changes a JSON body.
  *
  * @param {object|null} init Request init about to be passed to fetch.
- * @param {string|null} [label] Short feature name, e.g. 'Summarizer'.
+ * @param {string|null} [label] Short feature name, e.g. 'ExampleFeature'.
  * @returns {object|null} The same init, for chaining.
  */
 export function markInternalRequest(init, label = null) {

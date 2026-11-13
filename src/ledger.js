@@ -13,7 +13,7 @@ export const USAGE_CHAT_METADATA_KEY = 'spendbook_usage';
 const NAMESPACE_VERSION = 1;
 
 export class UsageLedger {
-    /** @type {Map<string|null, {chatId: string|null, records: object[], revision: number}>} */
+    /** @type {Map<string|null, {chatId: string|null, ownerChatId: string|null, records: object[], revision: number}>} */
     #byChat = new Map();
 
     #getChatId;
@@ -80,8 +80,12 @@ export class UsageLedger {
     loadChat(chatId) {
         const state = this.#ensureState(chatId);
         const metadata = this.#isActiveChat(chatId) ? this.#getMetadata() : null;
-        const persisted = normalizeNamespace(metadata?.[USAGE_CHAT_METADATA_KEY]);
-        if (!persisted || persisted.ownerChatId !== chatId) return;
+        const raw = metadata?.[USAGE_CHAT_METADATA_KEY];
+        const persisted = normalizeNamespace(raw);
+        if (!persisted || persisted.ownerChatId !== chatId) {
+            if (raw != null && metadata) delete metadata[USAGE_CHAT_METADATA_KEY];
+            return;
+        }
         if (state.revision > 0 && state.revision >= persisted.revision) return;
 
         state.records = persisted.records.map(record => ({ ...record }));
