@@ -12,10 +12,12 @@
         </label>
         <div class="spendbook-panel">
             <div class="spendbook-health" role="status"></div>
+            <div class="spendbook-totals"></div>
             <div class="spendbook-alltime"></div>
             <div class="spendbook-empty"></div>
-            <table class="spendbook-table" hidden>
-                <thead>
+            <div class="spendbook-table-wrap">
+                <table class="spendbook-table" hidden>
+                    <thead>
                     <tr>
                         <th>Time</th>
                         <th>Origin</th>
@@ -24,19 +26,60 @@
                         <th>Model</th>
                         <th>Prompt</th>
                         <th>Completion</th>
+                        <th>Cost</th>
+                        <th>Saving</th>
                         <th>Latency</th>
                         <th>Status</th>
                         <th>Source</th>
                     </tr>
-                </thead>
-                <tbody class="spendbook-rows"></tbody>
-            </table>
+                    </thead>
+                    <tbody class="spendbook-rows"></tbody>
+                </table>
+            </div>
             <div class="spendbook-retention"></div>
         </div>
         <div class="spendbook-actions">
             <button type="button" class="menu_button spendbook-reset-chat">Reset this chat</button>
             <button type="button" class="menu_button spendbook-reset-alltime">Reset all time</button>
         </div>
+        <section class="spendbook-prices">
+            <div class="spendbook-prices-title">Price table</div>
+            <small class="spendbook-prices-hint">
+                Prices are per million tokens and are used only for a provider and model
+                you enter here. A cost or cache discount the provider reports is shown as
+                reported and never recomputed, and OpenRouter credits are not converted.
+                Cost is resolved from this table for every row, including rows the
+                retention cap folded. The all-time line counts tokens across chats;
+                cost is per chat.
+            </small>
+            <div class="spendbook-price-meta">
+                <label>
+                    Currency
+                    <input type="text" class="text_pole spendbook-price-currency" aria-label="Price currency" />
+                </label>
+                <label>
+                    Prices updated
+                    <input type="text" class="text_pole spendbook-price-updated" aria-label="Date the prices were updated" />
+                </label>
+            </div>
+            <div class="spendbook-table-wrap">
+                <table class="spendbook-table spendbook-price-table">
+                    <thead>
+                    <tr>
+                        <th>Provider</th>
+                        <th>Model</th>
+                        <th>Hit</th>
+                        <th>Miss</th>
+                        <th>Output</th>
+                        <th>Cache write</th>
+                        <th></th>
+                    </tr>
+                    </thead>
+                    <tbody class="spendbook-price-rows"></tbody>
+                </table>
+            </div>
+            <button type="button" class="menu_button spendbook-price-add">Add price row</button>
+        </section>
         <small class="spendbook-privacy-note">
             Spendbook records token counts, cost and latency for chat-completion
             requests made by this browser. It never stores prompt text, and an

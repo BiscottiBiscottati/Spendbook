@@ -12,7 +12,9 @@ import {
     normalizeUsageAccumulator,
     normalizeUsageArchive,
     subtractUsageAccumulators,
+    sumUsageRecords,
 } from '../src/stats.js';
+import { ACME_PRICES, ACME_PRICED_ROW } from './fixtures/prices.js';
 
 // The shape a zeroed accumulator must have, written out here so a bug in the
 // accumulator cannot agree with itself.
@@ -29,6 +31,7 @@ const ZERO_COUNTERS = {
     estimatedPromptTokens: 0,
     hitTokens: 0,
     ratedPromptTokens: 0,
+    cacheWriteTokens: 0,
     completionTokens: 0,
     reasoningTokens: 0,
     totalTokens: 0,
@@ -73,6 +76,7 @@ describe('Spendbook usage accumulator', () => {
             estimatedPromptTokens: 0,
             hitTokens: 300,
             ratedPromptTokens: 1200,
+            cacheWriteTokens: 0,
             completionTokens: 340,
             reasoningTokens: 0,
             totalTokens: 1540,
@@ -192,11 +196,17 @@ describe('Spendbook evicted-row archive', () => {
     });
 
     it('normalizes a missing or malformed archive', () => {
-        expect(normalizeUsageArchive(null)).toEqual({ total: ZERO_COUNTERS, byOrigin: {}, byConfiguration: {} });
-        expect(normalizeUsageArchive({ total: { requests: 2 }, byOrigin: 'nope' })).toEqual({
+        expect(normalizeUsageArchive(null)).toEqual({
+            total: ZERO_COUNTERS,
+            byOrigin: {},
+            byConfiguration: {},
+            byModel: {},
+        });
+        expect(normalizeUsageArchive({ total: { requests: 2 }, byOrigin: 'nope', byModel: 'nope' })).toEqual({
             total: { ...ZERO_COUNTERS, requests: 2 },
             byOrigin: {},
             byConfiguration: {},
+            byModel: {},
         });
     });
 
@@ -220,5 +230,163 @@ describe('Spendbook evicted-row archive', () => {
         expect(merged.byConfiguration['batch-8'].accumulator).toMatchObject({ promptTokens: 500 });
         expect(isUsageArchiveEmpty(merged)).toBe(false);
         expect(isUsageArchiveEmpty(createUsageArchive())).toBe(true);
+    });
+});
+
+describe('Spendbook dollars', () => {
+    it('keeps the price inputs of a folded row under its provider and model', () => {
+        const archive = createUsageArchive();
+        addRecordToUsageArchive(archive, record(ACME_PRICED_ROW));
+
+        const bucket = archive.byModel['acme\u0000m1'];
+        expect(bucket).toMatchObject({ provider: 'acme', model: 'm1' });
+        expect(bucket.unpricedCost).toMatchObject({ requests: 1, promptTokens: 1200, hitTokens: 400, completionTokens: 340 });
+        expect(bucket.unpricedSaving).toMatchObject({ requests: 1, hitTokens: 400 });
+        expect(bucket.reportedCost).toBe(0);
+    });
+
+    it('keeps a folded provider-reported figure instead of pricing it', () => {
+        const archive = createUsageArchive();
+        addRecordToUsageArchive(archive, record({ ...ACME_PRICED_ROW, cost: 0.42, cacheDiscount: 0.07 }));
+
+        const bucket = archive.byModel['acme\u0000m1'];
+        expect(bucket).toMatchObject({
+            reportedCost: 0.42,
+            reportedCostRequests: 1,
+            reportedSaving: 0.07,
+            reportedSavingRequests: 1,
+        });
+        // Nothing is left for the table to price.
+        expect(bucket.unpricedCost.requests).toBe(0);
+        expect(bucket.unpricedSaving.requests).toBe(0);
+    });
+
+    it('folds no price inputs for a row the estimator could not have priced', () => {
+        const archive = createUsageArchive();
+        addRecordToUsageArchive(archive, record({
+            ...ACME_PRICED_ROW,
+            promptTokens: null,
+            hitTokens: null,
+            usageSource: 'estimated',
+            estimatedPromptTokens: 900,
+            completionTokens: 100,
+        }));
+
+        const totals = sumUsageRecords({ records: [], archive, prices: ACME_PRICES });
+
+        // On screen that row shows no dollars, so folding its zeros must not
+        // invent a cost or a zero saving.
+        expect(totals.cost).toEqual({
+            measured: 0,
+            measuredRequests: 0,
+            estimated: 0,
+            estimatedRequests: 0,
+            requests: 0,
+        });
+        expect(totals.saving.estimatedRequests).toBe(0);
+    });
+
+    it('archives no price inputs for a failed row', () => {
+        const archive = createUsageArchive();
+        addRecordToUsageArchive(archive, record({
+            status: 'error',
+            usageSource: 'unavailable',
+            promptTokens: null,
+            hitTokens: null,
+        }));
+
+        expect(archive.byModel).toEqual({});
+        expect(archive.total).toMatchObject({ requests: 0, excludedRequests: 1 });
+    });
+
+    it('prices a folded row with the table in force when the total is summed', () => {
+        const archive = createUsageArchive();
+        addRecordToUsageArchive(archive, record(ACME_PRICED_ROW));
+
+        const priced = sumUsageRecords({ records: [], archive, prices: ACME_PRICES });
+
+        // 400 * 0.003 + 800 * 0.15 + 340 * 0.6 = 325.2 micro-dollars, saving 58.8.
+        expect(priced.cost.estimated).toBeCloseTo(0.0003252, 12);
+        expect(priced.cost.estimatedRequests).toBe(1);
+        expect(priced.cost.measured).toBe(0);
+        expect(priced.saving.estimated).toBeCloseTo(0.0000588, 12);
+        expect(priced.counters).toMatchObject({ requests: 1, promptTokens: 1200 });
+    });
+
+    it('prices a folded row exactly like the same row left visible', () => {
+        const withWriteRate = {
+            currency: 'USD',
+            updated: '',
+            entries: [{ provider: 'acme', model: 'm1', hit: 0.003, miss: 0.15, output: 0.6, cacheWrite: 0.3 }],
+        };
+        const billed = record({ ...ACME_PRICED_ROW, promptTokens: 1000, hitTokens: 400, cacheWriteTokens: 100, completionTokens: 200 });
+        const archive = createUsageArchive();
+        addRecordToUsageArchive(archive, billed);
+
+        const visible = sumUsageRecords({ records: [billed], archive: null, prices: withWriteRate });
+        const folded = sumUsageRecords({ records: [], archive, prices: withWriteRate });
+
+        // 400 * 0.003 + 100 * 0.3 + 500 * 0.15 + 200 * 0.6 = 226.2 micro-dollars.
+        expect(visible.cost.estimated).toBeCloseTo(0.0002262, 12);
+        expect(folded.cost.estimated).toBeCloseTo(visible.cost.estimated, 12);
+        expect(folded.saving.estimated).toBeCloseTo(visible.saving.estimated, 12);
+    });
+
+    it('reprices a folded row when the table changes', () => {
+        const archive = createUsageArchive();
+        addRecordToUsageArchive(archive, record(ACME_PRICED_ROW));
+        const cheaper = {
+            currency: 'USD',
+            updated: '',
+            entries: [{ provider: 'acme', model: 'm1', hit: 0.003, miss: 0.3, output: 0.6, cacheWrite: null }],
+        };
+
+        const before = sumUsageRecords({ records: [], archive, prices: ACME_PRICES });
+        const after = sumUsageRecords({ records: [], archive, prices: cheaper });
+        const withoutPrices = sumUsageRecords({ records: [], archive, prices: null });
+
+        expect(before.cost.estimated).toBeCloseTo(0.0003252, 12);
+        // 400 * 0.003 + 800 * 0.3 + 340 * 0.6 = 445.2 micro-dollars.
+        expect(after.cost.estimated).toBeCloseTo(0.0004452, 12);
+        // Removing the price row removes the dollars, folded rows included.
+        expect(withoutPrices.cost).toEqual({
+            measured: 0,
+            measuredRequests: 0,
+            estimated: 0,
+            estimatedRequests: 0,
+            requests: 0,
+        });
+    });
+
+    it('counts folded reported dollars and folded table dollars side by side', () => {
+        const archive = createUsageArchive();
+        addRecordToUsageArchive(archive, record({ ...ACME_PRICED_ROW, recordId: 'r-1' }));
+        addRecordToUsageArchive(archive, record({
+            ...ACME_PRICED_ROW,
+            recordId: 'r-2',
+            cost: 0.42,
+        }));
+
+        const totals = sumUsageRecords({ records: [], archive, prices: ACME_PRICES });
+
+        expect(totals.cost.measured).toBe(0.42);
+        expect(totals.cost.measuredRequests).toBe(1);
+        expect(totals.cost.estimated).toBeCloseTo(0.0003252, 12);
+        expect(totals.cost.estimatedRequests).toBe(1);
+        expect(totals.cost.requests).toBe(2);
+    });
+
+    it('merges the model groups of two archives', () => {
+        const left = createUsageArchive();
+        addRecordToUsageArchive(left, record({ ...ACME_PRICED_ROW, recordId: 'r-1' }));
+        const right = createUsageArchive();
+        addRecordToUsageArchive(right, record({ ...ACME_PRICED_ROW, recordId: 'r-2', cost: 0.5 }));
+
+        const merged = mergeUsageArchives(left, right);
+        const bucket = merged.byModel['acme\u0000m1'];
+
+        expect(bucket.unpricedCost.requests).toBe(1);
+        expect(bucket.reportedCost).toBe(0.5);
+        expect(bucket.reportedCostRequests).toBe(1);
     });
 });

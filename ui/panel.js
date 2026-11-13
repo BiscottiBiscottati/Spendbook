@@ -3,12 +3,14 @@
  *
  * The entry module renders `settings.html` through SillyTavern's template
  * loader and hands the HTML here; this module mounts it, binds the tracking
- * toggle and paints the usage table from a read-only snapshot. The caller owns
- * the ledger, the observer and the settings; the panel only reads through
- * `getSnapshot` and asks the entry module to persist a toggle change.
+ * toggle and paints the usage table from a read-only snapshot. The price table
+ * is its own module. The caller owns the ledger, the observer and the settings;
+ * the panel only reads through `getSnapshot`, and asks the entry module to
+ * persist a toggle or a price change.
  */
 
 import { buildUsageView } from './view.js';
+import { mountPriceEditor } from './price-editor.js';
 
 const TRACKING_TOGGLE_ID = 'spendbook_tracking_enabled';
 
@@ -24,9 +26,10 @@ const RESET_ALL_TIME_MESSAGE = 'Clear Spendbook’s all-time totals? '
  * @param {string} options.html Rendered drawer markup
  * @param {import('../src/settings.js').SpendbookSettings} options.settings Settings with defaults already merged
  * @param {(trackingEnabled: boolean) => void} options.onTrackingChange Called when the user flips the tracking toggle
- * @param {() => ({records: object[], trackingEnabled: boolean, health: object|null, retention: object|null, allTime: object|null})} [options.getSnapshot] Reads the current ledger and observer state; called on mount, on refresh and after a toggle change
+ * @param {() => ({records: object[], trackingEnabled: boolean, health: object|null, retention: object|null, allTime: object|null, archive: object|null})} [options.getSnapshot] Reads the current ledger and observer state; called on mount, on refresh, after a toggle change and after a price edit
  * @param {() => void} [options.onResetChat] Clears the open chat after the user confirmed it
  * @param {() => void} [options.onResetAllTime] Clears the all-time totals after the user confirmed it
+ * @param {(prices: import('../src/prices.js').UsagePriceTable) => void} [options.onPricesChange] Persists the edited price table
  * @param {(message: string) => boolean} [options.confirmReset] Asks the user; declining leaves the ledger untouched
  * @returns {{root: HTMLElement, refresh: () => void}} The mounted drawer and its repaint function
  */
@@ -38,6 +41,7 @@ export function mountSpendbookPanel({
     getSnapshot = null,
     onResetChat = () => {},
     onResetAllTime = () => {},
+    onPricesChange = () => {},
     confirmReset = defaultConfirmReset,
 }) {
     container.insertAdjacentHTML('beforeend', html);
@@ -52,6 +56,7 @@ export function mountSpendbookPanel({
     }
 
     const healthLine = root.querySelector('.spendbook-health');
+    const totalsLine = root.querySelector('.spendbook-totals');
     const allTimeLine = root.querySelector('.spendbook-alltime');
     const emptyLine = root.querySelector('.spendbook-empty');
     const table = root.querySelector('.spendbook-table');
@@ -59,7 +64,8 @@ export function mountSpendbookPanel({
     const retentionLine = root.querySelector('.spendbook-retention');
     const resetChatButton = root.querySelector('.spendbook-reset-chat');
     const resetAllTimeButton = root.querySelector('.spendbook-reset-alltime');
-    if (!healthLine || !allTimeLine || !emptyLine || !table || !rows
+    const priceSection = root.querySelector('.spendbook-prices');
+    if (!healthLine || !totalsLine || !allTimeLine || !emptyLine || !table || !rows
         || !retentionLine || !resetChatButton || !resetAllTimeButton) {
         throw new Error('Spendbook: the settings template has no usage table.');
     }
@@ -70,9 +76,10 @@ export function mountSpendbookPanel({
     };
 
     const refresh = () => {
-        const view = buildUsageView(readSnapshot());
+        const view = buildUsageView({ ...readSnapshot(), prices: editor.prices });
         healthLine.textContent = view.health.label;
         healthLine.dataset.state = view.health.state;
+        totalsLine.textContent = view.totals.label;
         allTimeLine.textContent = view.allTime.label;
         emptyLine.textContent = view.empty ? view.emptyMessage : '';
         emptyLine.hidden = !view.empty;
@@ -80,6 +87,17 @@ export function mountSpendbookPanel({
         retentionLine.textContent = view.retention.label;
         rows.replaceChildren(...view.rows.map(renderRow));
     };
+
+    // Only edits that change computed results repaint; the editor keeps its own
+    // fields, so the next keystroke still lands where the user left it.
+    const editor = mountPriceEditor({
+        section: priceSection,
+        prices: settings.prices,
+        onChange: (prices) => {
+            onPricesChange(prices);
+            refresh();
+        },
+    });
 
     toggle.checked = settings.trackingEnabled;
     toggle.addEventListener('change', () => {
@@ -123,6 +141,8 @@ function renderRow(row) {
     appendCell(tr, 'model', row.modelLabel);
     appendCell(tr, 'prompt', row.promptLabel);
     appendCell(tr, 'completion', row.completionLabel);
+    appendCell(tr, 'cost', row.costLabel);
+    appendCell(tr, 'saving', row.savingLabel);
     appendCell(tr, 'latency', row.latencyLabel);
     appendCell(tr, 'status', row.statusLabel);
     appendCell(tr, 'source', row.sourceLabel);

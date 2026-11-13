@@ -10,7 +10,7 @@
 import { eventSource, event_types, saveMetadata, saveSettingsDebounced } from '../../../../script.js';
 import { extension_settings, getContext, renderExtensionTemplateAsync } from '../../../extensions.js';
 import { getSanitizedFilename } from '../../../utils.js';
-import { readSpendbookSettings, setTrackingEnabled } from './src/settings.js';
+import { readSpendbookSettings, setPriceTable, setTrackingEnabled } from './src/settings.js';
 import { UsageLedger } from './src/ledger.js';
 import { createPromptTokenEstimator } from './src/estimator.js';
 import { getUsageObserverHealth, installUsageObserver } from './src/observer.js';
@@ -105,6 +105,7 @@ async function mountSettingsDrawer() {
             health: getUsageObserverHealth(),
             retention: ledger.retentionFor(getChatId()),
             allTime: ledger.allTimeForView(),
+            archive: ledger.archivedFor(getChatId()),
         }),
         onTrackingChange: (trackingEnabled) => {
             setTrackingEnabled(extension_settings, trackingEnabled);
@@ -120,6 +121,10 @@ async function mountSettingsDrawer() {
         onResetAllTime: () => {
             ledger.resetAllTime();
             refreshPanel();
+        },
+        onPricesChange: (prices) => {
+            setPriceTable(extension_settings, prices);
+            saveSettingsDebounced();
         },
     });
     refreshPanel = panel.refresh;

@@ -6,8 +6,13 @@
  * keep counting. The same accumulator shape carries the all-time bucket of each
  * chat in local storage.
  *
- * Both the archive and a live summary read one record the same way, so a folded
- * row and a visible one can never disagree about what a completed request is.
+ * Counters are price-independent on purpose. A folded row is gone, so what it
+ * would cost has to be recoverable: its token counts are kept per provider and
+ * model, next to the dollars the provider itself reported, and every dollar
+ * figure is resolved against the price table the user has when the drawer is
+ * painted. Editing or deleting a price therefore reprices folded rows and
+ * visible rows alike, and no figure is frozen in a currency the table has since
+ * changed.
  */
 
 const ACCUMULATOR_FIELDS = Object.freeze([
@@ -23,12 +28,14 @@ const ACCUMULATOR_FIELDS = Object.freeze([
     'estimatedPromptTokens',
     'hitTokens',
     'ratedPromptTokens',
+    'cacheWriteTokens',
     'completionTokens',
     'reasoningTokens',
     'totalTokens',
 ]);
 
 import { USAGE_ORIGINS } from './origin.js';
+import { resolveUsageCost } from './prices.js';
 
 const COMPLETED_STATUSES = new Set(['ok', 'no-usage']);
 
@@ -67,7 +74,7 @@ export function normalizeUsageAccumulator(value) {
  */
 export function addRecordToUsageAccumulator(accumulator, record) {
     if (!accumulator || typeof accumulator !== 'object') return accumulator;
-    if (!isCompleted(record)) {
+    if (!isCompletedUsageRecord(record)) {
         accumulator.excludedRequests += 1;
         return accumulator;
     }
@@ -75,13 +82,13 @@ export function addRecordToUsageAccumulator(accumulator, record) {
     accumulator.requests += 1;
     if (isMeasured(record)) {
         accumulator.measuredRequests += 1;
-        if (isTokenCount(record.promptTokens)) {
+        if (isNonNegativeNumber(record.promptTokens)) {
             accumulator.promptTokens += record.promptTokens;
             accumulator.coveredRequests += 1;
         }
     } else if (isEstimated(record)) {
         accumulator.estimatedRequests += 1;
-        if (isTokenCount(record.estimatedPromptTokens)) {
+        if (isNonNegativeNumber(record.estimatedPromptTokens)) {
             accumulator.estimatedPromptTokens += record.estimatedPromptTokens;
             accumulator.estimatedPromptRequests += 1;
         }
@@ -91,15 +98,18 @@ export function addRecordToUsageAccumulator(accumulator, record) {
 
     // The hit-rate pair is only comparable when the provider reported both
     // counts, so a request without them never dilutes the rate.
-    if (isTokenCount(record.promptTokens) && isTokenCount(record.hitTokens)) {
+    if (isNonNegativeNumber(record.promptTokens) && isNonNegativeNumber(record.hitTokens)) {
         accumulator.ratedRequests += 1;
         accumulator.ratedPromptTokens += record.promptTokens;
         accumulator.hitTokens += record.hitTokens;
     }
-    // Output counts are summed as reported; a row without one adds nothing.
-    if (isTokenCount(record.completionTokens)) accumulator.completionTokens += record.completionTokens;
-    if (isTokenCount(record.reasoningTokens)) accumulator.reasoningTokens += record.reasoningTokens;
-    if (isTokenCount(record.totalTokens)) accumulator.totalTokens += record.totalTokens;
+    // Output and cache-write counts are summed as reported; a row without one
+    // adds nothing. Cache writes are kept because the price table bills them at
+    // their own rate, and a folded row must price like a visible one.
+    if (isNonNegativeNumber(record.cacheWriteTokens)) accumulator.cacheWriteTokens += record.cacheWriteTokens;
+    if (isNonNegativeNumber(record.completionTokens)) accumulator.completionTokens += record.completionTokens;
+    if (isNonNegativeNumber(record.reasoningTokens)) accumulator.reasoningTokens += record.reasoningTokens;
+    if (isNonNegativeNumber(record.totalTokens)) accumulator.totalTokens += record.totalTokens;
     return accumulator;
 }
 
@@ -144,25 +154,28 @@ export function isUsageAccumulatorEmpty(accumulator) {
 }
 
 /**
- * The per-chat archive of the rows the retention cap has evicted: overall, per
- * origin and per configuration label.
+ * The per-chat archive of the rows the retention cap has evicted: token
+ * counters overall, per origin and per configuration label; the price inputs —
+ * token counts per provider and model — and the dollars a provider reported,
+ * which no price table can reproduce.
  *
- * @returns {{total: object, byOrigin: object, byConfiguration: object}}
+ * @returns {{total: object, byOrigin: object, byConfiguration: object, byModel: object}}
  */
 export function createUsageArchive() {
-    return { total: createUsageAccumulator(), byOrigin: {}, byConfiguration: {} };
+    return { total: createUsageAccumulator(), byOrigin: {}, byConfiguration: {}, byModel: {} };
 }
 
 /**
  * Coerces a persisted archive into the shape the totals expect.
  *
  * @param {object|null} value
- * @returns {{total: object, byOrigin: object, byConfiguration: object}}
+ * @returns {{total: object, byOrigin: object, byConfiguration: object, byModel: object}}
  */
 export function normalizeUsageArchive(value) {
     const archive = createUsageArchive();
     if (!value || typeof value !== 'object') return archive;
     archive.total = normalizeUsageAccumulator(value.total);
+
     for (const [origin, counters] of Object.entries(value.byOrigin ?? {})) {
         if (!counters || typeof counters !== 'object') continue;
         archive.byOrigin[origin] = normalizeUsageAccumulator(counters);
@@ -174,12 +187,17 @@ export function normalizeUsageArchive(value) {
             accumulator: normalizeUsageAccumulator(entry.accumulator),
         };
     }
+    for (const [key, entry] of Object.entries(value.byModel ?? {})) {
+        if (!entry || typeof entry !== 'object') continue;
+        archive.byModel[key] = normalizeModelBucket(entry);
+    }
     return archive;
 }
 
 /**
- * Folds one evicted record into the archive's total, its origin group and its
- * configuration group.
+ * Folds one evicted record into the archive: its token counters into the
+ * overall, origin and configuration groups, and its price inputs into its
+ * provider-and-model group so the dollars can still be resolved later.
  *
  * @param {object} archive
  * @param {object} record
@@ -199,6 +217,9 @@ export function addRecordToUsageArchive(archive, record) {
         archive.byConfiguration[key] = { configuration, accumulator: createUsageAccumulator() };
     }
     addRecordToUsageAccumulator(archive.byConfiguration[key].accumulator, record);
+
+    if (!isCompletedUsageRecord(record)) return archive;
+    addRecordToModelBucket(archive, record);
     return archive;
 }
 
@@ -218,15 +239,22 @@ export function mergeUsageArchives(left, right) {
     }
     for (const [key, entry] of Object.entries(source.byConfiguration)) {
         if (!target.byConfiguration[key]) {
-            target.byConfiguration[key] = {
-                configuration: entry.configuration,
-                accumulator: createUsageAccumulator(),
-            };
+            target.byConfiguration[key] = { configuration: entry.configuration, accumulator: createUsageAccumulator() };
         }
         target.byConfiguration[key].accumulator = mergeUsageAccumulators(
             target.byConfiguration[key].accumulator,
             entry.accumulator,
         );
+    }
+    for (const [key, bucket] of Object.entries(source.byModel)) {
+        const merged = target.byModel[key] ?? createModelBucket(bucket.provider, bucket.model);
+        merged.unpricedCost = mergeUsageAccumulators(merged.unpricedCost, bucket.unpricedCost);
+        merged.unpricedSaving = mergeUsageAccumulators(merged.unpricedSaving, bucket.unpricedSaving);
+        merged.reportedCost += bucket.reportedCost;
+        merged.reportedCostRequests += bucket.reportedCostRequests;
+        merged.reportedSaving += bucket.reportedSaving;
+        merged.reportedSavingRequests += bucket.reportedSavingRequests;
+        target.byModel[key] = merged;
     }
     return target;
 }
@@ -246,7 +274,203 @@ export function isUsageArchiveEmpty(archive) {
     for (const entry of Object.values(archive.byConfiguration ?? {})) {
         if (!isUsageAccumulatorEmpty(entry?.accumulator)) return false;
     }
+    for (const bucket of Object.values(archive.byModel ?? {})) {
+        if (bucket?.reportedCostRequests || bucket?.reportedSavingRequests) return false;
+        if (!isUsageAccumulatorEmpty(bucket?.unpricedCost)) return false;
+        if (!isUsageAccumulatorEmpty(bucket?.unpricedSaving)) return false;
+    }
     return true;
+}
+
+/**
+ * The whole picture for one chat: visible rows plus the folded counters, with
+ * every dollar figure resolved against the given price table. Dollars stay
+ * split by source — a provider-reported amount and a table-derived one are not
+ * the same unit and are never added together here.
+ *
+ * @param {object} [options]
+ * @param {object[]} [options.records] Retained records for one chat.
+ * @param {{total?: object, byModel?: object}|null} [options.archive] Counters of the folded rows.
+ * @param {import('./prices.js').UsagePriceTable|null} [options.prices] Table in force now
+ * @returns {{
+ *   counters: object,
+ *   cost: {measured: number, measuredRequests: number, estimated: number, estimatedRequests: number, requests: number},
+ *   saving: {measured: number, measuredRequests: number, estimated: number, estimatedRequests: number, requests: number},
+ * }}
+ */
+export function sumUsageRecords({ records = [], archive = null, prices = null } = {}) {
+    const counters = createUsageAccumulator();
+    const cost = createDollarTotals();
+    const saving = createDollarTotals();
+
+    for (const record of Array.isArray(records) ? records : []) {
+        addRecordToUsageAccumulator(counters, record);
+        if (!isCompletedUsageRecord(record)) continue;
+        const resolved = resolveUsageCost(record, prices);
+        addDollarFigure(cost, resolved.cost, resolved.costSource);
+        addDollarFigure(saving, resolved.saving, resolved.savingSource);
+    }
+
+    const folded = normalizeUsageArchive(archive);
+    for (const bucket of Object.values(folded.byModel)) {
+        addFoldedDollars(bucket, prices, cost, saving);
+    }
+
+    return {
+        counters: mergeUsageAccumulators(counters, folded.total),
+        cost: finishDollarTotals(cost),
+        saving: finishDollarTotals(saving),
+    };
+}
+
+/**
+ * Adds one folded model group's dollars: the amounts the provider reported, plus
+ * the table's price for the rows that reported nothing.
+ *
+ * @param {object} bucket
+ * @param {import('./prices.js').UsagePriceTable|null} prices
+ * @param {object} cost
+ * @param {object} saving
+ */
+function addFoldedDollars(bucket, prices, cost, saving) {
+    if (bucket.reportedCostRequests > 0) {
+        cost.measured += bucket.reportedCost;
+        cost.measuredRequests += bucket.reportedCostRequests;
+    }
+    if (bucket.reportedSavingRequests > 0) {
+        saving.measured += bucket.reportedSaving;
+        saving.measuredRequests += bucket.reportedSavingRequests;
+    }
+    if (!prices) return;
+
+    // Only rows the estimator can use are folded, and only a group with rows in
+    // it is priced: a counter that never arrived must not read as a zero.
+    if (bucket.unpricedCost.requests > 0) {
+        const unpriced = resolveUsageCost(asPriceInputs(bucket, bucket.unpricedCost), prices);
+        if (unpriced.cost != null) {
+            cost.estimated += unpriced.cost;
+            cost.estimatedRequests += bucket.unpricedCost.requests;
+        }
+    }
+    if (bucket.unpricedSaving.requests > 0) {
+        const unpriced = resolveUsageCost(asPriceInputs(bucket, bucket.unpricedSaving), prices);
+        if (unpriced.saving != null) {
+            saving.estimated += unpriced.saving;
+            saving.estimatedRequests += bucket.unpricedSaving.requests;
+        }
+    }
+}
+
+/**
+ * The price inputs of one folded group: the token counts the estimator reads,
+ * with the group's provider and model so it resolves against the right row.
+ *
+ * @param {object} bucket
+ * @param {object} counters
+ * @returns {object}
+ */
+function asPriceInputs(bucket, counters) {
+    return {
+        provider: bucket.provider,
+        model: bucket.model,
+        promptTokens: counters.promptTokens,
+        hitTokens: counters.hitTokens,
+        cacheWriteTokens: counters.cacheWriteTokens,
+        completionTokens: counters.completionTokens,
+    };
+}
+
+/**
+ * Puts one completed record into its provider-and-model group: tokens of the
+ * rows the table must price, and the amounts the provider reported itself.
+ *
+ * @param {object} archive
+ * @param {object} record
+ */
+function addRecordToModelBucket(archive, record) {
+    const provider = modelKeyPart(record.provider) || 'unknown';
+    const model = modelKeyPart(record.model) || 'unknown';
+    const key = `${provider}\u0000${model}`;
+    if (!archive.byModel) archive.byModel = {};
+    if (!archive.byModel[key]) archive.byModel[key] = createModelBucket(provider, model);
+    const bucket = archive.byModel[key];
+
+    // A row without a reported figure is the one the table has to price — but
+    // only a row the estimator can price is folded. A row with no prompt count
+    // (or no cache count to save from) stays out: on screen it shows no dollar
+    // figure, and folding its zeros would invent one.
+    const resolved = resolveUsageCost(record, null);
+    if (resolved.costSource === 'measured') {
+        bucket.reportedCost += resolved.cost;
+        bucket.reportedCostRequests += 1;
+    } else if (isNonNegativeNumber(record.promptTokens)) {
+        addRecordToUsageAccumulator(bucket.unpricedCost, record);
+    }
+    if (resolved.savingSource === 'measured') {
+        bucket.reportedSaving += resolved.saving;
+        bucket.reportedSavingRequests += 1;
+    } else if (isNonNegativeNumber(record.hitTokens)) {
+        addRecordToUsageAccumulator(bucket.unpricedSaving, record);
+    }
+}
+
+/**
+ * @param {string} provider
+ * @param {string} model
+ * @returns {object}
+ */
+function createModelBucket(provider, model) {
+    return {
+        provider,
+        model,
+        unpricedCost: createUsageAccumulator(),
+        unpricedSaving: createUsageAccumulator(),
+        reportedCost: 0,
+        reportedCostRequests: 0,
+        reportedSaving: 0,
+        reportedSavingRequests: 0,
+    };
+}
+
+/**
+ * @param {object} entry
+ * @returns {object}
+ */
+function normalizeModelBucket(entry) {
+    const bucket = createModelBucket(
+        modelKeyPart(entry.provider) || 'unknown',
+        modelKeyPart(entry.model) || 'unknown',
+    );
+    bucket.unpricedCost = normalizeUsageAccumulator(entry.unpricedCost);
+    bucket.unpricedSaving = normalizeUsageAccumulator(entry.unpricedSaving);
+    bucket.reportedCost = isNonNegativeNumber(entry.reportedCost) ? entry.reportedCost : 0;
+    bucket.reportedCostRequests = isNonNegativeNumber(entry.reportedCostRequests) ? entry.reportedCostRequests : 0;
+    bucket.reportedSaving = isNonNegativeNumber(entry.reportedSaving) ? entry.reportedSaving : 0;
+    bucket.reportedSavingRequests = isNonNegativeNumber(entry.reportedSavingRequests) ? entry.reportedSavingRequests : 0;
+    return bucket;
+}
+
+function createDollarTotals() {
+    return { measured: 0, measuredRequests: 0, estimated: 0, estimatedRequests: 0 };
+}
+
+function addDollarFigure(totals, value, source) {
+    if (!Number.isFinite(value) || source === 'unavailable') return;
+    if (source === 'measured') {
+        totals.measured += value;
+        totals.measuredRequests += 1;
+    } else {
+        totals.estimated += value;
+        totals.estimatedRequests += 1;
+    }
+}
+
+function finishDollarTotals(totals) {
+    return { ...totals, requests: totals.measuredRequests + totals.estimatedRequests };
+}
+
+function modelKeyPart(value) {
+    return typeof value === 'string' ? value.trim().toLowerCase() : '';
 }
 
 /**
@@ -264,7 +488,15 @@ function configurationLabel(value) {
     return typeof value === 'string' && value.trim() ? value : null;
 }
 
-function isCompleted(record) {
+/**
+ * True for a record that completed. Failed and aborted rows are counted apart
+ * from the totals and can never carry dollars, so both the aggregates and the
+ * drawer read the same rule.
+ *
+ * @param {object} record
+ * @returns {boolean}
+ */
+export function isCompletedUsageRecord(record) {
     return !!record && COMPLETED_STATUSES.has(record.status);
 }
 
@@ -273,9 +505,9 @@ function isMeasured(record) {
 }
 
 function isEstimated(record) {
-    return record?.usageSource === 'estimated' || isTokenCount(record?.estimatedPromptTokens);
+    return record?.usageSource === 'estimated' || isNonNegativeNumber(record?.estimatedPromptTokens);
 }
 
-function isTokenCount(value) {
+function isNonNegativeNumber(value) {
     return Number.isFinite(value) && value >= 0;
 }

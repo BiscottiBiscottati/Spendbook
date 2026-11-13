@@ -7,6 +7,7 @@ import {
     USAGE_RECORD_LIMIT,
     UsageLedger,
 } from '../src/ledger.js';
+import { ACME_PRICED_ROW } from './fixtures/prices.js';
 
 function record(overrides = {}) {
     return {
@@ -241,9 +242,36 @@ describe('Spendbook ledger — retention', () => {
         expect(reloaded.retentionFor('chat-a')).toEqual({ limit: 500, retained: 500, total: 501 });
         expect(reloaded.archivedFor('chat-a').total.requests).toBe(1);
     });
-});
 
-describe('Spendbook ledger — all-time aggregate', () => {
+    it('keeps the price inputs of a row it evicts, so it can still be priced', () => {
+        const harness = createHarness();
+        harness.ledger.add(record({
+            ...ACME_PRICED_ROW,
+            promptTokens: 1000,
+            hitTokens: 400,
+            completionTokens: 200,
+        }));
+        for (let index = 2; index <= USAGE_RECORD_LIMIT + 1; index += 1) {
+            harness.ledger.add(record({ recordId: `r-${index}`, timestamp: index }));
+        }
+        harness.ledger.flush();
+
+        const archived = harness.ledger.archivedFor('chat-a');
+        expect(archived.total.requests).toBe(1);
+        expect(archived.byModel['acme\u0000m1'].unpricedCost).toMatchObject({
+            requests: 1,
+            promptTokens: 1000,
+            hitTokens: 400,
+            completionTokens: 200,
+        });
+
+        // The folded inputs survive a reload of the chat, so the totals can
+        // price them with whatever table is in force later.
+        const reloaded = harness.createLedger();
+        reloaded.loadChat('chat-a');
+        expect(reloaded.archivedFor('chat-a').byModel['acme\u0000m1'].unpricedCost.hitTokens).toBe(400);
+    });
+
     it('counts every chat in the all-time total', () => {
         const harness = createHarness();
         harness.ledger.add(record());

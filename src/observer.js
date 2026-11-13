@@ -570,6 +570,13 @@ function buildRecord({
     const totalTokens = reportedTotal ?? (
         promptTokens != null && completionTokens != null ? promptTokens + completionTokens : null
     );
+    // Providers disagree on where the cached count lives: DeepSeek reports
+    // `prompt_cache_hit_tokens`, the OpenAI shape nests it in the prompt details.
+    const hitTokens = toCount(reported?.prompt_cache_hit_tokens)
+        ?? toCount(reported?.prompt_tokens_details?.cached_tokens);
+    const reportedMiss = toCount(reported?.prompt_cache_miss_tokens);
+    const cacheWriteTokens = toCount(reported?.prompt_tokens_details?.cache_write_tokens)
+        ?? toCount(reported?.cache_write_tokens);
 
     return {
         recordId: createRecordId(),
@@ -587,8 +594,24 @@ function buildRecord({
         latencyMs,
         messageCount: Array.isArray(body.messages) ? body.messages.length : null,
         promptTokens,
+        hitTokens,
+        // A miss is a prompt token the cache neither hit nor had to write, so
+        // the derived count subtracts both; the reported one already does.
+        missTokens: reportedMiss ?? (
+            promptTokens != null && hitTokens != null
+                ? Math.max(0, promptTokens - hitTokens - (cacheWriteTokens ?? 0))
+                : null
+        ),
+        cacheWriteTokens,
         completionTokens,
+        reasoningTokens: toCount(reported?.completion_tokens_details?.reasoning_tokens),
         totalTokens,
+        cost: toCount(reported?.cost),
+        // Kept nullable on purpose: no chat-completion provider seen here sends
+        // a cache discount (OpenRouter's exists only on /api/v1/generation), so
+        // the price table derives the saving. If one ever does, it wins as
+        // reported.
+        cacheDiscount: toCount(reported?.cache_discount),
         estimatedPromptTokens,
         usageSource: reported ? 'measured' : (estimatedPromptTokens != null ? 'estimated' : 'unavailable'),
     };

@@ -12,6 +12,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 import { mountSpendbookPanel } from '../ui/panel.js';
 import { readSpendbookSettings, setTrackingEnabled } from '../src/settings.js';
+import { ACME_PRICES, ACME_PRICED_ROW } from './fixtures/prices.js';
 
 const templateHtml = readFileSync(join(process.cwd(), 'settings.html'), 'utf8');
 
@@ -21,6 +22,7 @@ function mount({
     getSnapshot = null,
     onResetChat = () => {},
     onResetAllTime = () => {},
+    onPricesChange = () => {},
     confirmReset = () => true,
 } = {}) {
     document.body.innerHTML = '<div id="extensions_settings2"></div>';
@@ -33,6 +35,7 @@ function mount({
         getSnapshot,
         onResetChat,
         onResetAllTime,
+        onPricesChange,
         confirmReset,
     });
     return { container, panel };
@@ -53,6 +56,11 @@ function row(overrides = {}) {
         usageSource: 'measured',
         ...overrides,
     };
+}
+
+// The shared rates price this row at $0.00032520, saving $0.00005880.
+function pricedRow(overrides = {}) {
+    return row({ ...ACME_PRICED_ROW, ...overrides });
 }
 
 describe('Spendbook drawer', () => {
@@ -374,5 +382,123 @@ describe('Spendbook drawer — reset actions', () => {
         expect(confirmReset.mock.calls[0][0]).toMatch(/all-time/i);
         expect(onResetAllTime).toHaveBeenCalledTimes(1);
         expect(onResetChat).not.toHaveBeenCalled();
+    });
+});
+
+describe('Spendbook drawer — cost', () => {
+    const prices = ACME_PRICES;
+
+    beforeEach(() => {
+        document.body.innerHTML = '';
+    });
+
+    it('shows a placeholder in every cost cell and says the table is empty on a fresh install', () => {
+        const { container } = mount({
+            settings: { trackingEnabled: true },
+            getSnapshot: () => ({ records: [row()], trackingEnabled: true, health: { captured: 1 } }),
+        });
+
+        const [rendered] = container.querySelectorAll('.spendbook-rows tr');
+        expect(rendered.querySelector('.spendbook-cell-cost').textContent).toBe('—');
+        expect(rendered.querySelector('.spendbook-cell-saving').textContent).toBe('—');
+        expect(container.querySelector('.spendbook-totals').textContent).toMatch(/no cost — the price table is empty\.$/);
+        expect(container.querySelectorAll('.spendbook-price-rows tr')).toHaveLength(0);
+    });
+
+    it('prices the rows and the chat totals once a matching row exists', () => {
+        const { container } = mount({
+            settings: { trackingEnabled: true, prices },
+            getSnapshot: () => ({ records: [pricedRow()], trackingEnabled: true, health: { captured: 1 } }),
+        });
+
+        const [rendered] = container.querySelectorAll('.spendbook-rows tr');
+        expect(rendered.querySelector('.spendbook-cell-cost').textContent).toBe('$0.00032520');
+        expect(rendered.querySelector('.spendbook-cell-saving').textContent).toBe('$0.00005880');
+        expect(container.querySelector('.spendbook-totals').textContent)
+            .toContain('$0.00032520 cost · $0.00005880 cache saving');
+    });
+
+    it('repaints the results from an edited price without replacing the field being edited', () => {
+        const onPricesChange = vi.fn();
+        const { container } = mount({
+            settings: { trackingEnabled: true, prices },
+            getSnapshot: () => ({ records: [pricedRow()], trackingEnabled: true, health: { captured: 1 } }),
+            onPricesChange,
+        });
+        const hitInput = container.querySelector('[data-price-index="0"][data-price-field="hit"]');
+
+        hitInput.value = '0.01';
+        hitInput.dispatchEvent(new Event('change', { bubbles: true }));
+
+        expect(onPricesChange).toHaveBeenCalledTimes(1);
+        expect(onPricesChange.mock.calls[0][0].entries[0].hit).toBe(0.01);
+        // 400 * 0.01 + 800 * 0.15 + 340 * 0.6 = 328 micro-dollars.
+        expect(container.querySelector('.spendbook-cell-cost').textContent).toBe('$0.00032800');
+        expect(container.querySelector('[data-price-index="0"][data-price-field="hit"]')).toBe(hitInput);
+    });
+
+    it('adds a blank row, focuses it and persists it', () => {
+        const onPricesChange = vi.fn();
+        const { container } = mount({ settings: { trackingEnabled: true, prices }, onPricesChange });
+
+        container.querySelector('.spendbook-price-add').click();
+
+        const stored = onPricesChange.mock.calls[0][0];
+        expect(stored.entries).toHaveLength(2);
+        expect(stored.entries[1]).toEqual({ provider: '', model: '', hit: null, miss: null, output: null, cacheWrite: null });
+        expect(container.querySelectorAll('.spendbook-price-rows tr')).toHaveLength(2);
+        expect(document.activeElement).toBe(container.querySelector('[data-price-index="1"][data-price-field="provider"]'));
+    });
+
+    it('removes the row whose button was clicked and folds the cost away', () => {
+        const onPricesChange = vi.fn();
+        const { container } = mount({
+            settings: { trackingEnabled: true, prices },
+            getSnapshot: () => ({ records: [pricedRow()], trackingEnabled: true, health: { captured: 1 } }),
+            onPricesChange,
+        });
+
+        container.querySelector('.spendbook-price-remove').click();
+
+        expect(onPricesChange.mock.calls[0][0].entries).toHaveLength(0);
+        expect(container.querySelectorAll('.spendbook-price-rows tr')).toHaveLength(0);
+        expect(container.querySelector('.spendbook-cell-cost').textContent).toBe('—');
+        expect(container.querySelector('.spendbook-totals').textContent).toMatch(/no cost — the price table is empty/);
+    });
+
+    it('clears a price field it cannot read, so the field never claims a rate', () => {
+        const onPricesChange = vi.fn();
+        const { container } = mount({
+            settings: { trackingEnabled: true, prices },
+            getSnapshot: () => ({ records: [pricedRow()], trackingEnabled: true, health: { captured: 1 } }),
+            onPricesChange,
+        });
+        const hitInput = container.querySelector('[data-price-index="0"][data-price-field="hit"]');
+
+        hitInput.value = 'abc';
+        hitInput.dispatchEvent(new Event('change', { bubbles: true }));
+
+        expect(onPricesChange.mock.calls[0][0].entries[0].hit).toBeNull();
+        expect(hitInput.value).toBe('');
+        // The 400 hit tokens can no longer be priced, and the drawer says so
+        // instead of showing a confident number.
+        expect(container.querySelector('.spendbook-cell-cost').textContent).toBe('—');
+        expect(container.querySelector('.spendbook-totals').textContent).toMatch(/no cost — no complete price row for these requests/);
+    });
+
+    it('stores the currency the user types', () => {
+        const onPricesChange = vi.fn();
+        const { container } = mount({
+            settings: { trackingEnabled: true, prices },
+            getSnapshot: () => ({ records: [pricedRow()], trackingEnabled: true, health: { captured: 1 } }),
+            onPricesChange,
+        });
+        const currencyInput = container.querySelector('.spendbook-price-currency');
+
+        currencyInput.value = 'EUR';
+        currencyInput.dispatchEvent(new Event('change', { bubbles: true }));
+
+        expect(onPricesChange.mock.calls[0][0].currency).toBe('EUR');
+        expect(container.querySelector('.spendbook-cell-cost').textContent.startsWith('€')).toBe(true);
     });
 });

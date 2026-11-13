@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { readSpendbookSettings, setTrackingEnabled } from '../src/settings.js';
+import { readSpendbookSettings, setPriceTable, setTrackingEnabled } from '../src/settings.js';
 
 describe('Spendbook settings', () => {
     it('reads defaults for a fresh install, leaving the shared settings object alone', () => {
@@ -23,7 +23,11 @@ describe('Spendbook settings', () => {
         const settings = readSpendbookSettings(extensionSettings);
 
         expect(settings.trackingEnabled).toBe(true);
-        expect(settings.prices).toEqual(prices);
+        expect(settings.prices).toEqual({
+            currency: 'EUR',
+            updated: '2026-11-13',
+            entries: [{ provider: 'acme', model: 'm1', hit: null, miss: null, output: null, cacheWrite: null }],
+        });
         expect(settings.includeChatNames).toBe(false);
     });
 
@@ -48,5 +52,28 @@ describe('Spendbook settings', () => {
         expect(extensionSettings.otherExtension).toBe(other);
         expect(Object.keys(extensionSettings).sort()).toEqual(['otherExtension', 'spendbook']);
         expect(readSpendbookSettings(extensionSettings).trackingEnabled).toBe(true);
+    });
+
+    it('writes the price table into Spendbook’s namespace and reads it back normalized', () => {
+        const extensionSettings = { otherExtension: { someSetting: true } };
+
+        setPriceTable(extensionSettings, {
+            currency: 'EUR',
+            updated: '2026-11-13',
+            entries: [{ provider: 'acme', model: 'm1', hit: 0.5, miss: 'nope' }],
+        });
+
+        expect(extensionSettings.spendbook.prices).toEqual({
+            currency: 'EUR',
+            updated: '2026-11-13',
+            entries: [{ provider: 'acme', model: 'm1', hit: 0.5, miss: null, output: null, cacheWrite: null }],
+        });
+        expect(extensionSettings.otherExtension).toEqual({ someSetting: true });
+        expect(readSpendbookSettings(extensionSettings).prices.entries[0].hit).toBe(0.5);
+    });
+
+    it('keeps a store that cannot be read as an empty table instead of throwing', () => {
+        expect(readSpendbookSettings({ spendbook: 'garbage' }).prices).toEqual({ currency: 'USD', updated: '', entries: [] });
+        expect(readSpendbookSettings(undefined).prices).toEqual({ currency: 'USD', updated: '', entries: [] });
     });
 });

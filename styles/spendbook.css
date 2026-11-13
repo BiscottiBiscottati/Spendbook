@@ -7,6 +7,10 @@
 
 .spendbook-panel {
     margin-top: 8px;
+}
+
+/* The table scrolls; the lines above it must not scroll away with it. */
+.spendbook-table-wrap {
     overflow-x: auto;
 }
 
@@ -16,6 +20,7 @@
     font-size: 0.9em;
 }
 
+.spendbook-totals,
 .spendbook-alltime,
 .spendbook-retention {
     margin: 6px 0;
@@ -63,6 +68,62 @@
 }
 
 .spendbook-table td {
+    white-space: nowrap;
+}
+
+.spendbook-prices {
+    margin-top: 12px;
+}
+
+.spendbook-prices-title {
+    margin-bottom: 4px;
+    font-weight: 600;
+}
+
+.spendbook-prices-hint {
+    display: block;
+    margin-bottom: 6px;
+    color: var(--SmartThemeEmColor);
+    font-size: 0.9em;
+    line-height: 1.4;
+}
+
+.spendbook-price-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.spendbook-price-meta label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.9em;
+}
+
+.spendbook-price-meta .text_pole {
+    width: auto;
+    min-width: 7ch;
+}
+
+.spendbook-price-table input.text_pole {
+    width: auto;
+}
+
+.spendbook-price-table input[data-price-field="provider"],
+.spendbook-price-table input[data-price-field="model"] {
+    width: 12ch;
+}
+
+.spendbook-price-table input[type="number"] {
+    width: 8ch;
+}
+
+.spendbook-price-add,
+.spendbook-price-remove {
+    width: auto;
+    margin-top: 6px;
     white-space: nowrap;
 }
 

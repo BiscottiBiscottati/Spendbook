@@ -1,15 +1,25 @@
 /**
  * Spendbook view model.
  *
- * Pure: records, tracking state and observer health in; labels and numbers out.
- * The panel renders this and nothing else, so the drawer's text is testable
- * without a DOM and a format change cannot reach into the ledger.
+ * Pure: records, the folded counters, the price table, tracking state, observer
+ * health and the aggregates in; labels and numbers out. The panel renders this
+ * and nothing else, so the drawer's text is testable without a DOM and a format
+ * change cannot reach into the ledger.
  */
 
 import { USAGE_ORIGINS } from '../src/origin.js';
+import { resolveUsageCost } from '../src/prices.js';
+import { isCompletedUsageRecord, sumUsageRecords } from '../src/stats.js';
 
 const PLACEHOLDER = '—';
 const NUMBER_FORMAT = new Intl.NumberFormat('en-US');
+// A provider-reported figure is shown as reported, never converted: OpenRouter
+// reports credits, not the price table's currency.
+const REPORTED_FORMAT = new Intl.NumberFormat('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 8,
+});
+const COST_FORMATTERS = new Map();
 
 const KNOWN_ORIGINS = new Set(Object.values(USAGE_ORIGINS));
 
@@ -36,11 +46,14 @@ const SOURCE_LABELS = Object.freeze({
  * @param {object|null} [options.health] Observer health counters, when installed.
  * @param {{limit: number, retained: number, total: number}|null} [options.retention] Row counts for the active chat.
  * @param {{totals: object, chats: number}|null} [options.allTime] Cross-chat aggregate.
+ * @param {{total: object}|null} [options.archive] Counters of the rows the retention cap folded.
+ * @param {import('../src/prices.js').UsagePriceTable|null} [options.prices] User-entered price table.
  * @returns {{
  *   trackingEnabled: boolean,
  *   health: {state: string, label: string},
  *   retention: {limit: number, retained: number, total: number, folded: number, label: string},
  *   allTime: {requests: number, excluded: number, chats: number, label: string},
+ *   totals: object,
  *   empty: boolean,
  *   emptyMessage: string,
  *   rows: object[],
@@ -52,14 +65,17 @@ export function buildUsageView({
     health = null,
     retention = null,
     allTime = null,
+    archive = null,
+    prices = null,
 } = {}) {
-    const rows = (Array.isArray(records) ? records : []).map(buildRow);
+    const rows = (Array.isArray(records) ? records : []).map((record) => buildRow(record, prices));
 
     return {
         trackingEnabled,
         health: describeObserverHealth({ trackingEnabled, health }),
         retention: describeRetention(retention),
-        allTime: describeAllTime(allTime),
+        allTime: describeAllTime(allTime, { hasPrices: hasPriceEntries(prices) }),
+        totals: describeUsageTotals({ records, archive, prices }),
         empty: rows.length === 0,
         emptyMessage: trackingEnabled
             ? 'No requests recorded yet. Send a message with tracking on to start the table.'
@@ -105,12 +121,14 @@ export function describeRetention(retention = {}) {
 
 /**
  * The all-time line: completed and excluded requests across every chat whose
- * bucket local storage still holds.
+ * bucket local storage still holds. The cross-chat aggregate counts tokens; a
+ * priced install is told so, because the drawer's only money is per chat.
  *
  * @param {{totals?: object, chats?: number}|null} [allTime]
+ * @param {{hasPrices?: boolean}} [options]
  * @returns {{requests: number, excluded: number, chats: number, promptTokens: number, estimatedPromptTokens: number, label: string}}
  */
-export function describeAllTime(allTime = {}) {
+export function describeAllTime(allTime = {}, { hasPrices = false } = {}) {
     const requests = toCount(allTime?.totals?.requests);
     const excluded = toCount(allTime?.totals?.excludedRequests);
     const promptTokens = toCount(allTime?.totals?.promptTokens);
@@ -135,14 +153,128 @@ export function describeAllTime(allTime = {}) {
     const estimated = estimatedPromptTokens > 0
         ? ` · ${formatCount(estimatedPromptTokens)} estimated prompt tokens`
         : '';
+    const costNote = hasPrices ? ' Cost is per chat.' : '';
     return {
         requests,
         excluded,
         chats,
         promptTokens,
         estimatedPromptTokens,
-        label: `All time: ${formatCountLabel(requests, 'completed request')}${stopped}, across ${formatCountLabel(chats, 'chat')}${measured}${estimated}.`,
+        label: `All time: ${formatCountLabel(requests, 'completed request')}${stopped}, across ${formatCountLabel(chats, 'chat')}${measured}${estimated}.${costNote}`,
     };
+}
+
+/**
+ * The chat's own total: the visible rows folded with the price table the user
+ * has now, plus the price inputs of the rows the retention cap folded earlier.
+ * Editing or deleting a price row therefore reprices the whole chat, folded
+ * rows included.
+ *
+ * Dollars stay split by source: a provider-reported figure is reported credits,
+ * not the table's currency, so it is never added to a table-derived one.
+ *
+ * @param {object} [options]
+ * @param {object[]} [options.records] Retained records for one chat.
+ * @param {{total?: object}|null} [options.archive] Counters of the folded rows.
+ * @param {import('../src/prices.js').UsagePriceTable|null} [options.prices]
+ * @returns {{
+ *   requests: number,
+ *   excluded: number,
+ *   promptTokens: number,
+ *   estimatedPromptTokens: number,
+ *   cost: {measured: number, measuredRequests: number, estimated: number, estimatedRequests: number, requests: number},
+ *   saving: {measured: number, measuredRequests: number, estimated: number, estimatedRequests: number, requests: number},
+ *   label: string,
+ * }}
+ */
+export function describeUsageTotals({ records = [], archive = null, prices = null } = {}) {
+    const { counters, cost, saving } = sumUsageRecords({ records, archive, prices });
+    const requests = toCount(counters.requests);
+    const excluded = toCount(counters.excludedRequests);
+    const promptTokens = toCount(counters.promptTokens);
+    const estimatedPromptTokens = toCount(counters.estimatedPromptTokens);
+    // The one fallback for a missing currency lives in formatCost.
+    const currency = prices?.currency;
+
+    const summary = {
+        requests,
+        excluded,
+        promptTokens,
+        estimatedPromptTokens,
+        cost,
+        saving,
+        label: '',
+    };
+    if (requests + excluded === 0) return summary;
+
+    const head = requests > 0
+        ? formatCountLabel(requests, 'completed request')
+        : formatCountLabel(excluded, 'failed or stopped request');
+    const stopped = requests > 0 && excluded > 0 ? ` and ${formatCount(excluded)} failed or stopped` : '';
+    const parts = [`This chat: ${head}${stopped}`];
+    if (promptTokens > 0) parts.push(`${formatCount(promptTokens)} prompt tokens`);
+    if (estimatedPromptTokens > 0) parts.push(`${formatCount(estimatedPromptTokens)} estimated prompt tokens`);
+
+    const costAmount = describeDollars(cost, currency);
+    if (costAmount) parts.push(`${costAmount} cost${coverageFor(cost, requests)}`);
+    const savingAmount = describeDollars(saving, currency);
+    if (savingAmount) parts.push(`${savingAmount} cache saving${coverageFor(saving, requests)}`);
+    if (!costAmount) {
+        parts.push(describeMissingCost({ prices, promptTokens }));
+    }
+
+    summary.label = `${parts.join(' · ')}.`;
+    return summary;
+}
+
+/**
+ * Why a total has no cost. The three reasons read differently because they ask
+ * the user for different things: a price row, or a request that reports its
+ * prompt tokens at all.
+ *
+ * @param {{prices: import('../src/prices.js').UsagePriceTable|null, promptTokens: number}} options
+ * @returns {string}
+ */
+function describeMissingCost({ prices, promptTokens }) {
+    if (!hasPriceEntries(prices)) return 'no cost — the price table is empty';
+    if (promptTokens === 0) return 'no cost — these requests reported no prompt count';
+    return 'no cost — no complete price row for these requests';
+}
+
+/**
+ * One dollar amount as text: a reported figure is shown as reported and never
+ * converted, a table-derived one in the table's currency, and both side by side
+ * when the requests split across the two — never added together, because
+ * reported credits and priced dollars are not the same unit.
+ *
+ * @param {{measured: number, measuredRequests: number, estimated: number, estimatedRequests: number}} figures
+ * @param {string} currency
+ * @returns {string|null}
+ */
+function describeDollars(figures, currency) {
+    const reported = figures.measuredRequests > 0;
+    const estimated = figures.estimatedRequests > 0;
+    if (!reported && !estimated) return null;
+
+    if (reported && estimated) {
+        return `${formatCost(figures.measured, currency, 'measured')} and `
+            + `${formatCost(figures.estimated, currency, 'estimated')} estimated`;
+    }
+    if (reported) return formatCost(figures.measured, currency, 'measured');
+    return formatCost(figures.estimated, currency, 'estimated');
+}
+
+/**
+ * How many requests a dollar figure actually covers, so a partial price cannot
+ * look like a complete one.
+ *
+ * @param {{measuredRequests: number, estimatedRequests: number}} figures
+ * @param {number} requests
+ * @returns {string}
+ */
+function coverageFor(figures, requests) {
+    if (figures.requests >= requests) return '';
+    return ` for ${formatCount(figures.requests)} of ${formatCount(requests)} requests`;
 }
 
 /**
@@ -185,10 +317,16 @@ export function describeObserverHealth({ trackingEnabled = false, health = null 
     };
 }
 
-function buildRow(record) {
+function buildRow(record, prices) {
     const measuredPrompt = Number.isFinite(record.promptTokens) ? record.promptTokens : null;
     const estimatedPrompt = Number.isFinite(record.estimatedPromptTokens) ? record.estimatedPromptTokens : null;
     const prompt = measuredPrompt ?? estimatedPrompt;
+    // A failed or aborted row never contributes to a total, so it must not
+    // show a dollar figure the total ignores.
+    const resolved = isCompletedUsageRecord(record)
+        ? resolveUsageCost(record, prices)
+        : { cost: null, costSource: 'unavailable', saving: null, savingSource: 'unavailable' };
+    const currency = prices?.currency;
 
     return {
         recordId: record.recordId ?? '',
@@ -201,6 +339,8 @@ function buildRow(record) {
             ? PLACEHOLDER
             : `${measuredPrompt == null ? '~' : ''}${formatCount(prompt)}`,
         completionLabel: formatCount(record.completionTokens),
+        costLabel: formatCost(resolved.cost, currency, resolved.costSource),
+        savingLabel: formatCost(resolved.saving, currency, resolved.savingSource),
         latencyLabel: formatLatency(record.latencyMs),
         statusLabel: STATUS_LABELS[record.status] ?? PLACEHOLDER,
         sourceLabel: SOURCE_LABELS[record.usageSource] ?? SOURCE_LABELS.unavailable,
@@ -212,6 +352,42 @@ function formatTime(timestamp) {
     const date = new Date(timestamp);
     const pad = (part) => String(part).padStart(2, '0');
     return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+/**
+ * One resolved dollar figure. A provider-reported figure is shown as reported
+ * and never converted into the table's currency; a table-derived one carries
+ * enough decimals to be read when a single turn costs a fraction of a cent.
+ *
+ * @param {number|null} value
+ * @param {string} currency
+ * @param {string} [source]
+ * @returns {string}
+ */
+function formatCost(value, currency, source = 'estimated') {
+    if (!Number.isFinite(value)) return PLACEHOLDER;
+    if (source === 'measured') return `${REPORTED_FORMAT.format(value)} reported`;
+
+    const digits = value !== 0 && Math.abs(value) < 0.01 ? 8 : 2;
+    const code = currency || 'USD';
+    const key = `${code}:${digits}`;
+    try {
+        if (!COST_FORMATTERS.has(key)) {
+            COST_FORMATTERS.set(key, new Intl.NumberFormat('en-US', {
+                style: 'currency',
+                currency: code,
+                minimumFractionDigits: digits,
+                maximumFractionDigits: digits,
+            }));
+        }
+        return COST_FORMATTERS.get(key).format(value);
+    } catch {
+        return `${NUMBER_FORMAT.format(value)} ${code}`;
+    }
+}
+
+function hasPriceEntries(prices) {
+    return Array.isArray(prices?.entries) && prices.entries.length > 0;
 }
 
 function formatLatency(latencyMs) {

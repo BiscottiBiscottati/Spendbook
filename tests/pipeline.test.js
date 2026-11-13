@@ -630,3 +630,121 @@ describe('Spendbook observer pipeline', () => {
         expect(getUsageObserverHealth(pipeline.target).captured).toBe(0);
     });
 });
+
+describe('Spendbook observer — provider-reported usage fields', () => {
+    beforeEach(() => {
+        noteGenerationEnded();
+    });
+
+    it('keeps every token count, cost and discount a JSON provider reported', async () => {
+        const pipeline = createPipeline();
+        pipeline.setResponse(jsonResponse({
+            id: 'resp-9',
+            model: 'model-a',
+            usage: {
+                prompt_tokens: 1000,
+                completion_tokens: 200,
+                total_tokens: 1200,
+                prompt_cache_hit_tokens: 400,
+                prompt_cache_miss_tokens: 550,
+                prompt_tokens_details: { cached_tokens: 400, cache_write_tokens: 50 },
+                completion_tokens_details: { reasoning_tokens: 80 },
+                cost: 0.0123,
+                cache_discount: 0.004,
+            },
+        }));
+
+        const response = await send(pipeline);
+        await response.json();
+        await waitForRecords(pipeline, 1);
+
+        expect(pipeline.records()[0]).toMatchObject({
+            promptTokens: 1000,
+            hitTokens: 400,
+            missTokens: 550,
+            cacheWriteTokens: 50,
+            completionTokens: 200,
+            reasoningTokens: 80,
+            totalTokens: 1200,
+            cost: 0.0123,
+            cacheDiscount: 0.004,
+        });
+    });
+
+    it('reads cached tokens from the prompt details and derives the miss count', async () => {
+        const pipeline = createPipeline();
+        pipeline.setResponse(jsonResponse({
+            id: 'resp-10',
+            usage: {
+                prompt_tokens: 1000,
+                completion_tokens: 200,
+                prompt_tokens_details: { cached_tokens: 300 },
+            },
+        }));
+
+        const response = await send(pipeline);
+        await response.json();
+        await waitForRecords(pipeline, 1);
+
+        expect(pipeline.records()[0]).toMatchObject({ hitTokens: 300, missTokens: 700, cacheWriteTokens: null });
+    });
+
+    it('leaves cache-write tokens out of the derived miss count', async () => {
+        const pipeline = createPipeline();
+        pipeline.setResponse(jsonResponse({
+            id: 'resp-12',
+            usage: {
+                prompt_tokens: 1000,
+                completion_tokens: 10,
+                prompt_tokens_details: { cached_tokens: 300, cache_write_tokens: 100 },
+            },
+        }));
+
+        const response = await send(pipeline);
+        await response.json();
+        await waitForRecords(pipeline, 1);
+
+        // A miss is a prompt token the cache neither hit nor wrote: 1000 - 300 - 100.
+        expect(pipeline.records()[0]).toMatchObject({ hitTokens: 300, cacheWriteTokens: 100, missTokens: 600 });
+    });
+
+    it('leaves cache counts unavailable when the provider reported neither', async () => {
+        const pipeline = createPipeline();
+
+        const response = await send(pipeline);
+        await response.json();
+        await waitForRecords(pipeline, 1);
+
+        expect(pipeline.records()[0]).toMatchObject({
+            hitTokens: null,
+            missTokens: null,
+            cacheWriteTokens: null,
+            reasoningTokens: null,
+            cost: null,
+            cacheDiscount: null,
+        });
+    });
+
+    it('keeps a cost and a cache discount reported in the streamed tail', async () => {
+        const pipeline = createPipeline();
+        pipeline.setResponse(sseResponse([
+            'data: {"id":"gen-11","choices":[{"delta":{"content":"hi"}}]}\n\n',
+            'data: {"id":"gen-11","choices":[{"delta":{}}],"usage":{"prompt_tokens":600,"completion_tokens":40,"total_tokens":640,"cost":0.005,"cache_discount":0.002,"prompt_tokens_details":{"cached_tokens":200}}}\n\n',
+            'data: [DONE]\n\n',
+        ]));
+
+        const response = await send(pipeline, requestInit({ stream: true }));
+        await response.text();
+        await waitForRecords(pipeline, 1);
+
+        expect(pipeline.records()[0]).toMatchObject({
+            status: 'ok',
+            promptTokens: 600,
+            hitTokens: 200,
+            missTokens: 400,
+            completionTokens: 40,
+            cost: 0.005,
+            cacheDiscount: 0.002,
+        });
+    });
+});

@@ -11,8 +11,9 @@
  * - the all-time aggregate, one bucket per chat, kept in local storage.
  *
  * Records are capped at the newest 500 per chat. An evicted row is folded into
- * counters (overall, per origin and per configuration label) rather than
- * dropped, so the chat's totals keep counting while the chat file stays small.
+ * counters (overall, per origin, per configuration label and per provider and
+ * model) rather than dropped, so the chat's totals keep counting — and keep
+ * being repriced when a price changes — while the chat file stays small.
  *
  * Lifecycle: deleting a chat removes its state, pending copy and bucket;
  * renaming moves them; a namespace whose owner id is not the open chat is a copy
@@ -454,6 +455,8 @@ export class UsageLedger {
 
     #evictOverflow(state) {
         while (state.records.length > USAGE_RECORD_LIMIT) {
+            // The archive keeps the row's token counts per provider and model
+            // rather than its dollars, so a later price edit still reprices it.
             addRecordToUsageArchive(state.archived, state.records.shift());
         }
     }
