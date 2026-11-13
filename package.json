@@ -1,0 +1,17 @@
+{
+  "name": "spendbook",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SillyTavern usage accounting: tokens, cost, cache hits and latency per chat.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "node scripts/check-syntax.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^27.0.1",
+    "vitest": "^3.2.7"
+  }
+}

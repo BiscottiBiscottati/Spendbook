@@ -1,0 +1,16 @@
+/*
+ * Spendbook styles.
+ *
+ * SillyTavern theme variables only: the drawer must match every theme without
+ * a second stylesheet. No colour literals, no extension-specific ids.
+ */
+
+.spendbook-privacy-note {
+    display: block;
+    margin-top: 8px;
+    padding-left: 8px;
+    border-left: 2px solid var(--SmartThemeBorderColor);
+    color: var(--SmartThemeEmColor);
+    font-size: 0.9em;
+    line-height: 1.4;
+}
