@@ -116,6 +116,68 @@ describe('Spendbook drawer table', () => {
         expect(rendered.querySelector('.spendbook-cell-completion').textContent).toBe('—');
     });
 
+    it('labels each row measured, estimated or unavailable', () => {
+        const { container } = mount({
+            settings: { trackingEnabled: true },
+            getSnapshot: () => ({
+                records: [
+                    row({ recordId: 'r-measured' }),
+                    row({
+                        recordId: 'r-estimated',
+                        promptTokens: null,
+                        completionTokens: null,
+                        status: 'no-usage',
+                        estimatedPromptTokens: 240,
+                        usageSource: 'estimated',
+                    }),
+                    row({
+                        recordId: 'r-unavailable',
+                        promptTokens: null,
+                        completionTokens: null,
+                        status: 'error',
+                        usageSource: 'unavailable',
+                    }),
+                ],
+                trackingEnabled: true,
+                health: { captured: 3 },
+            }),
+        });
+
+        const rows = [...container.querySelectorAll('.spendbook-rows tr')];
+        expect(rows.map(rendered => rendered.querySelector('.spendbook-cell-source').textContent))
+            .toEqual(['measured', 'estimated', 'unavailable']);
+        expect(rows[0].querySelector('.spendbook-cell-prompt').textContent).toBe('1,200');
+        expect(rows[1].querySelector('.spendbook-cell-prompt').textContent).toBe('~240');
+        expect(rows[2].querySelector('.spendbook-cell-prompt').textContent).toBe('—');
+    });
+
+    it('shows a failed or aborted request by its status', () => {
+        const { container } = mount({
+            settings: { trackingEnabled: true },
+            getSnapshot: () => ({
+                records: [
+                    row({ recordId: 'r-error', status: 'error', usageSource: 'unavailable' }),
+                    row({ recordId: 'r-aborted', status: 'aborted', usageSource: 'unavailable' }),
+                ],
+                trackingEnabled: true,
+                health: { captured: 2 },
+            }),
+        });
+
+        const statuses = [...container.querySelectorAll('.spendbook-cell-status')]
+            .map(cell => cell.textContent);
+        expect(statuses).toEqual(['error', 'aborted']);
+    });
+
+    it('counts skipped captures in the health line', () => {
+        const { container } = mount({
+            settings: { trackingEnabled: true },
+            getSnapshot: () => ({ records: [row()], trackingEnabled: true, health: { captured: 1, skipped: 2 } }),
+        });
+
+        expect(container.querySelector('.spendbook-health').textContent).toMatch(/2 requests skipped/i);
+    });
+
     it('shows the empty state when tracking is off', () => {
         const { container } = mount({
             settings: { trackingEnabled: false },

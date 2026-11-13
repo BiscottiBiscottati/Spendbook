@@ -15,6 +15,13 @@ const STATUS_LABELS = Object.freeze({
     ok: 'ok',
     'no-usage': 'no usage',
     error: 'error',
+    aborted: 'aborted',
+});
+
+const SOURCE_LABELS = Object.freeze({
+    measured: 'measured',
+    estimated: 'estimated',
+    unavailable: 'unavailable',
 });
 
 /**
@@ -55,25 +62,36 @@ export function describeObserverHealth({ trackingEnabled = false, health = null 
         return { state: 'not-installed', label: 'Tracking is on, but the observer is not installed yet.' };
     }
 
+    // A skipped body is an observable gap in the table, so it is reported even
+    // when the capture itself succeeded.
+    const skippedCount = Number(health.skipped) || 0;
+    const skipped = skippedCount > 0
+        ? `, ${formatCountLabel(skippedCount, 'request')} skipped`
+        : '';
+
     const errorCount = Number(health.errors) || 0;
     if (errorCount > 0) {
         return {
             state: 'error',
-            label: `Observer error — ${formatCountLabel(errorCount, 'capture attempt')} failed. Rows may be missing.`,
+            label: `Observer error — ${formatCountLabel(errorCount, 'capture attempt')} failed${skipped}. Rows may be missing.`,
         };
     }
 
     const captured = Number(health.captured) || 0;
     if (captured === 0) {
-        return { state: 'idle', label: 'Observer installed — no requests captured yet.' };
+        return { state: 'idle', label: `Observer installed — no requests captured yet${skipped}.` };
     }
     return {
         state: 'ok',
-        label: `Observer installed — ${formatCountLabel(captured, 'request')} captured.`,
+        label: `Observer installed — ${formatCountLabel(captured, 'request')} captured${skipped}.`,
     };
 }
 
 function buildRow(record) {
+    const measuredPrompt = Number.isFinite(record.promptTokens) ? record.promptTokens : null;
+    const estimatedPrompt = Number.isFinite(record.estimatedPromptTokens) ? record.estimatedPromptTokens : null;
+    const prompt = measuredPrompt ?? estimatedPrompt;
+
     return {
         recordId: record.recordId ?? '',
         timeLabel: formatTime(record.timestamp),
@@ -81,10 +99,13 @@ function buildRow(record) {
         labelLabel: record.label || PLACEHOLDER,
         providerLabel: record.provider || 'unknown',
         modelLabel: record.model || 'unknown',
-        promptLabel: formatCount(record.promptTokens),
+        promptLabel: prompt == null
+            ? PLACEHOLDER
+            : `${measuredPrompt == null ? '~' : ''}${formatCount(prompt)}`,
         completionLabel: formatCount(record.completionTokens),
         latencyLabel: formatLatency(record.latencyMs),
         statusLabel: STATUS_LABELS[record.status] ?? PLACEHOLDER,
+        sourceLabel: SOURCE_LABELS[record.usageSource] ?? SOURCE_LABELS.unavailable,
     };
 }
 

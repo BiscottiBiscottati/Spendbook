@@ -80,6 +80,7 @@ function renderRow(row) {
     appendCell(tr, 'completion', row.completionLabel);
     appendCell(tr, 'latency', row.latencyLabel);
     appendCell(tr, 'status', row.statusLabel);
+    appendCell(tr, 'source', row.sourceLabel);
     return tr;
 }
 

@@ -3,8 +3,11 @@
  *
  * One page-lifetime `fetch` wrapper for chat-completion traffic. Read-only: it
  * clones the response and returns the caller's own response untouched, and it
- * never changes the request. This ticket captures non-streamed JSON responses;
- * the SSE tail, rejected requests and HTTP errors arrive with their own ticket.
+ * never changes the request. Three capture paths share it: a non-streamed JSON
+ * body, the usage carried in an SSE reply's tail, and a request that was
+ * rejected or answered with a non-2xx status, which leaves a row carrying the
+ * status and no token numbers. A provider that omits usage gets an estimated
+ * prompt count when the injected estimator can supply one, never a zero.
  *
  * Off by default: while tracking is off nothing is installed, and a wrapper that
  * is already installed passes requests through untouched.
@@ -34,6 +37,9 @@ let _recordSequence = 0;
  *   request was sent.
  * @param {(record: object) => void} [options.handleRecord] Sink that receives
  *   one normalized record per captured request.
+ * @param {(messages: object[]) => (number|Promise<number|null>|null)} [options.estimatePromptTokens]
+ *   Optional prompt-token estimate from the request messages, used only when
+ *   the provider reported no usage. Runs after the response, never on its path.
  * @param {() => void} [options.onSettle] Called after every capture attempt,
  *   including a failed one, so the health line can refresh.
  * @param {() => number} [options.now] Clock, injected for tests.
@@ -46,6 +52,7 @@ export function installUsageObserver({
     getChatId = () => null,
     getRunId = () => null,
     handleRecord = () => {},
+    estimatePromptTokens = null,
     getOrigin = resolveUsageOrigin,
     onSettle = () => {},
     now = () => Date.now(),
@@ -60,10 +67,11 @@ export function installUsageObserver({
         getChatId,
         getRunId,
         handleRecord,
+        estimatePromptTokens,
         getOrigin,
         onSettle,
         now,
-        health: { matched: 0, captured: 0, errors: 0 },
+        health: { matched: 0, captured: 0, skipped: 0, errors: 0 },
     };
 
     if (target[USAGE_OBSERVER_MARKER]) return target.fetch;
@@ -87,16 +95,42 @@ export function installUsageObserver({
         const chatId = readIdentifier(sink, 'getChatId');
         const runId = readIdentifier(sink, 'getRunId');
 
-        const response = await originalFetch(input, init);
+        let response;
+        try {
+            response = await originalFetch(input, init);
+        } catch (error) {
+            startCapture(sink, () => captureRejectedRequest({
+                sink,
+                init,
+                chatId,
+                runId,
+                origin,
+                startedAt,
+                error,
+            }));
+            throw error;
+        }
+        const latencyMs = Math.max(0, sink.now() - startedAt);
 
         try {
-            if (!response.ok) return response;
-            // A streamed reply is counted by the next ticket; parsing its body
-            // as JSON here would only turn a good response into no row.
-            if (isEventStream(response, init)) return response;
+            if (!response.ok) {
+                startCapture(sink, () => captureHttpErrorRecord({
+                    sink,
+                    init,
+                    chatId,
+                    runId,
+                    origin,
+                    httpStatus: response.status,
+                    startedAt,
+                    latencyMs,
+                }));
+                return response;
+            }
             // Clone before returning: the caller's body must stay untouched.
+            // Everything else (including parsing the request body) runs in the
+            // floating continuation, after the caller has its response.
             const clone = response.clone();
-            startCapture(sink, () => captureJsonRecord({
+            const captured = {
                 sink,
                 init,
                 chatId,
@@ -104,9 +138,14 @@ export function installUsageObserver({
                 origin,
                 clone,
                 startedAt,
-                latencyMs: Math.max(0, sink.now() - startedAt),
+                latencyMs,
                 httpStatus: response.status,
-            }));
+            };
+            if (isEventStream(response, init)) {
+                startCapture(sink, () => captureStreamedRecord(captured));
+            } else {
+                startCapture(sink, () => captureJsonRecord(captured));
+            }
         } catch {
             noteHealth(sink, 'errors');
             /* the observer must never replace or delay the caller's response */
@@ -123,7 +162,7 @@ export function installUsageObserver({
  * Health of the installed observer, or null when none is installed.
  *
  * @param {object} [target] Object owning fetch (window in production).
- * @returns {{matched: number, captured: number, errors: number}|null}
+ * @returns {{matched: number, captured: number, skipped: number, errors: number}|null}
  */
 export function getUsageObserverHealth(target = globalThis) {
     try {
@@ -148,6 +187,16 @@ function noteHealth(sink, field) {
     } catch {
         /* health reporting must never affect capture */
     }
+}
+
+/**
+ * Where the request body carries no JSON string, the request is uncapturable.
+ * Counted in the health line rather than guessed at.
+ */
+function readBodyOrCountSkipped(sink, init) {
+    const body = readChatCompletionBody(init);
+    if (!body) noteHealth(sink, 'skipped');
+    return body;
 }
 
 function readIdentifier(sink, getter) {
@@ -206,13 +255,53 @@ function notifySettled(sink) {
     }
 }
 
+async function captureRejectedRequest(context) {
+    const { sink, init, chatId, runId, origin, startedAt, error } = context;
+    const body = readBodyOrCountSkipped(sink, init);
+    if (!body) return;
+
+    emitRecord(sink, buildRecord({
+        body,
+        chatId,
+        runId,
+        origin,
+        httpStatus: null,
+        usage: null,
+        status: usageStatus({ aborted: isAbortError(error, init?.signal), error: true }),
+        startedAt,
+        latencyMs: Math.max(0, sink.now() - startedAt),
+    }));
+}
+
+/**
+ * Records a non-2xx request without reading the response body: the caller's
+ * error response must stay untouched, and there is no usage to find there.
+ */
+async function captureHttpErrorRecord(context) {
+    const { sink, init, chatId, runId, origin, httpStatus, startedAt, latencyMs } = context;
+    const body = readBodyOrCountSkipped(sink, init);
+    if (!body) return;
+
+    emitRecord(sink, buildRecord({
+        body,
+        chatId,
+        runId,
+        origin,
+        httpStatus,
+        usage: null,
+        status: usageStatus({ error: true }),
+        startedAt,
+        latencyMs,
+    }));
+}
+
 /**
  * Reads a non-streamed response's JSON usage. Runs after the caller has the
  * response; a parse failure or provider error is a status, never a throw.
  */
 async function captureJsonRecord(context) {
     const { sink, init, chatId, runId, origin, clone, startedAt, latencyMs, httpStatus } = context;
-    const body = readChatCompletionBody(init);
+    const body = readBodyOrCountSkipped(sink, init);
     if (!body) return;
 
     let data = null;
@@ -223,7 +312,10 @@ async function captureJsonRecord(context) {
     }
 
     const usage = data && typeof data === 'object' ? data.usage : null;
-    const hasUsage = !!usage && typeof usage === 'object';
+    const status = usageStatus({ error: !!data?.error, usage });
+    const estimatedPromptTokens = status === 'no-usage'
+        ? await estimatePrompt(sink, body)
+        : null;
     emitRecord(sink, buildRecord({
         body,
         chatId,
@@ -233,7 +325,8 @@ async function captureJsonRecord(context) {
         responseModel: data?.model ?? null,
         responseId: data?.id ?? null,
         usage,
-        status: data?.error ? 'error' : (hasUsage ? 'ok' : 'no-usage'),
+        status,
+        estimatedPromptTokens,
         startedAt,
         latencyMs,
     }));
@@ -246,6 +339,146 @@ function emitRecord(sink, record) {
     } catch {
         noteHealth(sink, 'errors');
     }
+}
+
+/**
+ * Decodes a cloned SSE body incrementally, keeping only the last non-null
+ * usage and stopping at `[DONE]`. The caller's branch of the cloned stream is
+ * never awaited here.
+ */
+async function captureStreamedRecord(context) {
+    const { sink, init, chatId, runId, origin, clone, startedAt, latencyMs, httpStatus } = context;
+    const body = readBodyOrCountSkipped(sink, init);
+    if (!body) {
+        // Nothing to attribute: release the cloned branch instead of letting
+        // the tee buffer the rest of the stream for an unread reader.
+        cancelReader(clone?.body?.getReader?.());
+        return;
+    }
+
+    const { reader, ...result } = await readSseCapture(clone, init?.signal);
+    try {
+        const status = usageStatus(result);
+        const estimatedPromptTokens = status === 'no-usage'
+            ? await estimatePrompt(sink, body)
+            : null;
+        emitRecord(sink, buildRecord({
+            body,
+            chatId,
+            runId,
+            origin,
+            httpStatus,
+            responseId: result.responseId,
+            usage: result.usage,
+            status,
+            estimatedPromptTokens,
+            startedAt,
+            latencyMs,
+        }));
+    } finally {
+        // Record first, then cancel: cancelling is fire-and-forget because a
+        // tee-branch cancel can stay pending until the caller's branch drains.
+        if (reader) cancelReader(reader);
+    }
+}
+
+const MAX_SSE_CARRY = 1_000_000;
+
+/**
+ * Reads the cloned SSE stream to its terminal marker. Frames can be split
+ * across reads, so an incomplete line stays in the carry until the rest of it
+ * arrives.
+ */
+async function readSseCapture(clone, signal) {
+    const result = { usage: null, responseId: null, sawDone: false, aborted: false, error: false, reader: null };
+    const streamedBody = clone?.body;
+    if (!streamedBody || typeof streamedBody.getReader !== 'function') {
+        result.error = true;
+        return result;
+    }
+
+    const reader = streamedBody.getReader();
+    const decoder = new TextDecoder();
+    let carry = '';
+
+    try {
+        while (!result.sawDone) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            carry += decoder.decode(value, { stream: true });
+            carry = drainSseLines(carry, result);
+            if (carry.length > MAX_SSE_CARRY) carry = '';
+        }
+    } catch (error) {
+        if (isAbortError(error, signal)) result.aborted = true;
+        else result.error = true;
+    }
+
+    // A stream that ends without its terminal marker and without usage was
+    // cut off; do not let it pass as a completed request with no usage.
+    if (!result.sawDone && !result.usage && !result.aborted) result.error = true;
+
+    if (result.sawDone) result.reader = reader;
+
+    return result;
+}
+
+function cancelReader(reader) {
+    try {
+        reader.cancel().catch(() => {});
+    } catch {
+        /* already closed */
+    }
+}
+
+/**
+ * Consumes every complete `data:` line in the carry and returns the unfinished
+ * tail. A malformed payload is a status, never a throw: the rest of the stream
+ * may still carry usage.
+ */
+function drainSseLines(carry, result) {
+    let newline;
+    while ((newline = carry.indexOf('\n')) >= 0) {
+        const line = carry.slice(0, newline).replace(/\r$/, '');
+        carry = carry.slice(newline + 1);
+        if (!line.startsWith('data:')) continue;
+
+        const payload = line.slice(5).trim();
+        if (payload === '[DONE]') {
+            result.sawDone = true;
+            break;
+        }
+        if (!payload) continue;
+
+        let chunk;
+        try {
+            chunk = JSON.parse(payload);
+        } catch {
+            result.error = true;
+            continue;
+        }
+        if (!chunk || typeof chunk !== 'object') continue;
+
+        if (chunk.error) result.error = true;
+        if (chunk.usage && typeof chunk.usage === 'object') result.usage = chunk.usage;
+        if (typeof chunk.id === 'string') result.responseId = chunk.id;
+    }
+    return carry;
+}
+
+function isAbortError(error, signal) {
+    try {
+        if (signal?.aborted) return true;
+    } catch {
+        /* an unreadable signal is treated as not aborted */
+    }
+    return error?.name === 'AbortError';
+}
+
+function usageStatus({ aborted = false, error = false, usage = null } = {}) {
+    if (aborted) return 'aborted';
+    if (error) return 'error';
+    return usage && typeof usage === 'object' ? 'ok' : 'no-usage';
 }
 
 function isChatCompletionRequest(input) {
@@ -302,6 +535,22 @@ function readChatCompletionBody(init) {
     return body;
 }
 
+/**
+ * Runs the injected estimator after a usage-less response. A missing or
+ * failing estimator leaves the prompt count unavailable rather than inventing
+ * a number; the observer still records the request.
+ */
+async function estimatePrompt(sink, body) {
+    const estimator = sink?.estimatePromptTokens;
+    if (typeof estimator !== 'function' || !Array.isArray(body?.messages)) return null;
+    try {
+        const value = await estimator(body.messages);
+        return Number.isFinite(value) && value >= 0 ? Math.round(value) : null;
+    } catch {
+        return null;
+    }
+}
+
 function buildRecord({
     body,
     chatId,
@@ -312,6 +561,7 @@ function buildRecord({
     responseId = null,
     usage = null,
     status,
+    estimatedPromptTokens = null,
     startedAt,
     latencyMs,
 }) {
@@ -341,7 +591,8 @@ function buildRecord({
         promptTokens,
         completionTokens,
         totalTokens,
-        usageSource: hasUsage ? 'measured' : 'unavailable',
+        estimatedPromptTokens,
+        usageSource: hasUsage ? 'measured' : (estimatedPromptTokens != null ? 'estimated' : 'unavailable'),
     };
 }
 

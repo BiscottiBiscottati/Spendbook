@@ -11,6 +11,7 @@ import { eventSource, event_types, saveMetadata, saveSettingsDebounced } from '.
 import { extension_settings, getContext, renderExtensionTemplateAsync } from '../../../extensions.js';
 import { readSpendbookSettings, setTrackingEnabled } from './src/settings.js';
 import { UsageLedger } from './src/ledger.js';
+import { createPromptTokenEstimator } from './src/estimator.js';
 import { getUsageObserverHealth, installUsageObserver } from './src/observer.js';
 import { noteGenerationEnded, noteGenerationStarted } from './src/origin.js';
 import { mountSpendbookPanel } from './ui/panel.js';
@@ -25,6 +26,13 @@ const ledger = new UsageLedger({
     getChatId,
     getMetadata,
     saveMetadata: () => saveMetadata(),
+});
+
+// Prompt-token estimate for providers that omit usage. The tokenizer is
+// imported lazily, so an unavailable one leaves the row "unavailable" instead
+// of breaking the extension.
+const estimatePromptTokens = createPromptTokenEstimator({
+    loadTokenizer: () => import('../../../../scripts/tokenizers.js'),
 });
 
 let refreshPanel = () => {};
@@ -49,6 +57,7 @@ function installObserver() {
     return installUsageObserver({
         isEnabled: () => readSettings().trackingEnabled,
         getChatId,
+        estimatePromptTokens,
         handleRecord: (record) => ledger.add(record),
         // Refresh on settle, not on record: a skipped capture writes no record
         // but still changes the health line.
