@@ -95,18 +95,22 @@ export function installUsageObserver({
         const chatId = readIdentifier(sink, 'getChatId');
         const runId = readIdentifier(sink, 'getRunId');
 
+        // The capture context is built once; only the response-specific
+        // fields differ between the paths.
+        const captureContext = { sink, init, chatId, runId, origin, startedAt };
+
         let response;
         try {
             response = await originalFetch(input, init);
         } catch (error) {
-            startCapture(sink, () => captureRejectedRequest({
-                sink,
-                init,
-                chatId,
-                runId,
-                origin,
-                startedAt,
-                error,
+            // Latency is measured at the rejection, not when the deferred
+            // capture happens to run.
+            const latencyMs = Math.max(0, sink.now() - startedAt);
+            startCapture(sink, () => captureFailedRecord({
+                ...captureContext,
+                httpStatus: null,
+                status: recordStatus({ aborted: isAbortError(error, init?.signal), error: true }),
+                latencyMs,
             }));
             throw error;
         }
@@ -114,14 +118,10 @@ export function installUsageObserver({
 
         try {
             if (!response.ok) {
-                startCapture(sink, () => captureHttpErrorRecord({
-                    sink,
-                    init,
-                    chatId,
-                    runId,
-                    origin,
+                startCapture(sink, () => captureFailedRecord({
+                    ...captureContext,
                     httpStatus: response.status,
-                    startedAt,
+                    status: recordStatus({ error: true }),
                     latencyMs,
                 }));
                 return response;
@@ -130,21 +130,16 @@ export function installUsageObserver({
             // Everything else (including parsing the request body) runs in the
             // floating continuation, after the caller has its response.
             const clone = response.clone();
-            const captured = {
-                sink,
-                init,
-                chatId,
-                runId,
-                origin,
+            const responseContext = {
+                ...captureContext,
                 clone,
-                startedAt,
                 latencyMs,
                 httpStatus: response.status,
             };
             if (isEventStream(response, init)) {
-                startCapture(sink, () => captureStreamedRecord(captured));
+                startCapture(sink, () => captureStreamedRecord(responseContext));
             } else {
-                startCapture(sink, () => captureJsonRecord(captured));
+                startCapture(sink, () => captureJsonRecord(responseContext));
             }
         } catch {
             noteHealth(sink, 'errors');
@@ -255,30 +250,13 @@ function notifySettled(sink) {
     }
 }
 
-async function captureRejectedRequest(context) {
-    const { sink, init, chatId, runId, origin, startedAt, error } = context;
-    const body = readBodyOrCountSkipped(sink, init);
-    if (!body) return;
-
-    emitRecord(sink, buildRecord({
-        body,
-        chatId,
-        runId,
-        origin,
-        httpStatus: null,
-        usage: null,
-        status: usageStatus({ aborted: isAbortError(error, init?.signal), error: true }),
-        startedAt,
-        latencyMs: Math.max(0, sink.now() - startedAt),
-    }));
-}
-
 /**
- * Records a non-2xx request without reading the response body: the caller's
- * error response must stay untouched, and there is no usage to find there.
+ * Records a request that produced no usable reply — a rejected fetch or a
+ * non-2xx response. Either way the row carries the status and no token
+ * numbers, and the caller's rejection or error response is left untouched.
  */
-async function captureHttpErrorRecord(context) {
-    const { sink, init, chatId, runId, origin, httpStatus, startedAt, latencyMs } = context;
+async function captureFailedRecord(context) {
+    const { sink, init, chatId, runId, origin, httpStatus, status, startedAt, latencyMs } = context;
     const body = readBodyOrCountSkipped(sink, init);
     if (!body) return;
 
@@ -289,7 +267,7 @@ async function captureHttpErrorRecord(context) {
         origin,
         httpStatus,
         usage: null,
-        status: usageStatus({ error: true }),
+        status,
         startedAt,
         latencyMs,
     }));
@@ -311,8 +289,12 @@ async function captureJsonRecord(context) {
         data = null;
     }
 
-    const usage = data && typeof data === 'object' ? data.usage : null;
-    const status = usageStatus({ error: !!data?.error, usage });
+    // A body the observer could not read as a chat-completion object is a
+    // failed turn, not a usage-less reply: an estimate there would invent a
+    // number for a response nobody understood.
+    const readable = !!data && typeof data === 'object' && !Array.isArray(data);
+    const usage = readable ? data.usage : null;
+    const status = readable ? recordStatus({ error: !!data.error, usage }) : 'error';
     const estimatedPromptTokens = status === 'no-usage'
         ? await estimatePrompt(sink, body)
         : null;
@@ -358,7 +340,7 @@ async function captureStreamedRecord(context) {
 
     const { reader, ...result } = await readSseCapture(clone, init?.signal);
     try {
-        const status = usageStatus(result);
+        const status = recordStatus(result);
         const estimatedPromptTokens = status === 'no-usage'
             ? await estimatePrompt(sink, body)
             : null;
@@ -437,6 +419,10 @@ function cancelReader(reader) {
  * may still carry usage.
  */
 function drainSseLines(carry, result) {
+    // Providers behind SillyTavern emit one JSON payload per `data:` line. An
+    // event whose data spans several `data:` lines is legal SSE but is not
+    // reassembled here; such a frame is counted as a malformed payload.
+
     let newline;
     while ((newline = carry.indexOf('\n')) >= 0) {
         const line = carry.slice(0, newline).replace(/\r$/, '');
@@ -475,10 +461,22 @@ function isAbortError(error, signal) {
     return error?.name === 'AbortError';
 }
 
-function usageStatus({ aborted = false, error = false, usage = null } = {}) {
+function recordStatus({ aborted = false, error = false, usage = null } = {}) {
     if (aborted) return 'aborted';
     if (error) return 'error';
-    return usage && typeof usage === 'object' ? 'ok' : 'no-usage';
+    return reportedUsage(usage) ? 'ok' : 'no-usage';
+}
+
+/**
+ * A usage object counts as reported only when it carries a number. An empty
+ * `usage: {}` reports nothing, so it must not be labelled measured: the row
+ * stays usage-less and can still be estimated.
+ */
+function reportedUsage(usage) {
+    if (!usage || typeof usage !== 'object') return null;
+    const reported = ['prompt_tokens', 'completion_tokens', 'total_tokens']
+        .some(key => Number.isFinite(usage[key]));
+    return reported ? usage : null;
 }
 
 function isChatCompletionRequest(input) {
@@ -565,10 +563,10 @@ function buildRecord({
     startedAt,
     latencyMs,
 }) {
-    const hasUsage = !!usage && typeof usage === 'object';
-    const promptTokens = toCount(usage?.prompt_tokens);
-    const completionTokens = toCount(usage?.completion_tokens);
-    const reportedTotal = toCount(usage?.total_tokens);
+    const reported = reportedUsage(usage);
+    const promptTokens = toCount(reported?.prompt_tokens);
+    const completionTokens = toCount(reported?.completion_tokens);
+    const reportedTotal = toCount(reported?.total_tokens);
     const totalTokens = reportedTotal ?? (
         promptTokens != null && completionTokens != null ? promptTokens + completionTokens : null
     );
@@ -592,7 +590,7 @@ function buildRecord({
         completionTokens,
         totalTokens,
         estimatedPromptTokens,
-        usageSource: hasUsage ? 'measured' : (estimatedPromptTokens != null ? 'estimated' : 'unavailable'),
+        usageSource: reported ? 'measured' : (estimatedPromptTokens != null ? 'estimated' : 'unavailable'),
     };
 }
 

@@ -442,6 +442,24 @@ describe('Spendbook observer pipeline', () => {
         });
     });
 
+    it('measures a rejected request from send to rejection, not to the deferred capture', async () => {
+        let now = 1_000;
+        const pipeline = createPipeline({ observerOptions: { now: () => now } });
+        pipeline.setFailure(new TypeError('Failed to fetch'));
+
+        try {
+            await send(pipeline);
+        } catch {
+            /* the caller keeps its original rejection */
+        }
+        // The capture runs on the next macrotask; the clock moving in between
+        // must not land in the row.
+        now = 60_000;
+        await waitForRecords(pipeline, 1);
+
+        expect(pipeline.records()[0]).toMatchObject({ status: 'error', latencyMs: 0 });
+    });
+
     it('counts a request with no readable body as skipped instead of guessing', async () => {
         const pipeline = createPipeline();
 
@@ -521,6 +539,80 @@ describe('Spendbook observer pipeline', () => {
             estimatedPromptTokens: null,
             completionTokens: null,
             totalTokens: null,
+        });
+    });
+
+    it('estimates when the provider sends an empty usage object', async () => {
+        const estimator = vi.fn(async () => 180);
+        const pipeline = createPipeline({ observerOptions: { estimatePromptTokens: estimator } });
+        pipeline.setResponse(jsonResponse({ id: 'gen-4', usage: {} }));
+
+        await send(pipeline);
+        await waitForRecords(pipeline, 1);
+
+        expect(estimator).toHaveBeenCalledTimes(1);
+        expect(pipeline.records()[0]).toMatchObject({
+            status: 'no-usage',
+            usageSource: 'estimated',
+            promptTokens: null,
+            estimatedPromptTokens: 180,
+        });
+    });
+
+    it('records an empty usage object as unavailable when no estimate is possible', async () => {
+        const pipeline = createPipeline();
+        pipeline.setResponse(jsonResponse({ id: 'gen-5', usage: {} }));
+
+        await send(pipeline);
+        await waitForRecords(pipeline, 1);
+
+        expect(pipeline.records()[0]).toMatchObject({
+            status: 'no-usage',
+            usageSource: 'unavailable',
+            promptTokens: null,
+            completionTokens: null,
+            totalTokens: null,
+            estimatedPromptTokens: null,
+        });
+    });
+
+    it('estimates a streamed empty usage object', async () => {
+        const estimator = vi.fn(async () => 90);
+        const pipeline = createPipeline({ observerOptions: { estimatePromptTokens: estimator } });
+        pipeline.setResponse(sseResponse([
+            'data: {"id":"gen-6","usage":{}}\n\n',
+            'data: [DONE]\n\n',
+        ]));
+
+        await send(pipeline, requestInit({ stream: true }));
+        await waitForRecords(pipeline, 1);
+
+        expect(pipeline.records()[0]).toMatchObject({
+            status: 'no-usage',
+            usageSource: 'estimated',
+            estimatedPromptTokens: 90,
+        });
+    });
+
+    it('records an unreadable JSON body as an error instead of an estimated reply', async () => {
+        const estimator = vi.fn(async () => 500);
+        const pipeline = createPipeline({ observerOptions: { estimatePromptTokens: estimator } });
+        pipeline.setResponse(new Response('{"id":"gen-7","usa', {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+        }));
+
+        const returned = await send(pipeline);
+        await waitForRecords(pipeline, 1);
+
+        expect(returned).toBeInstanceOf(Response);
+        expect(estimator).not.toHaveBeenCalled();
+        expect(pipeline.records()[0]).toMatchObject({
+            status: 'error',
+            httpStatus: 200,
+            promptTokens: null,
+            usageSource: 'unavailable',
+            estimatedPromptTokens: null,
         });
     });
 
