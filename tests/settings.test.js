@@ -27,6 +27,17 @@ describe('Spendbook settings', () => {
         expect(settings.includeChatNames).toBe(false);
     });
 
+    it('copies saved price entries rather than aliasing them', () => {
+        const savedEntry = { provider: 'acme', model: 'm1', output: 1 };
+        const extensionSettings = { spendbook: { prices: { entries: [savedEntry] } } };
+
+        const settings = readSpendbookSettings(extensionSettings);
+        settings.prices.entries[0].output = 2;
+
+        expect(settings.prices.currency).toBe('USD');
+        expect(savedEntry.output).toBe(1);
+    });
+
     it('writes the tracking toggle into Spendbook’s namespace alone', () => {
         const other = { someSetting: true };
         const extensionSettings = { otherExtension: other };

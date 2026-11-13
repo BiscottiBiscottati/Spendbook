@@ -38,5 +38,9 @@ async function mountSettingsDrawer() {
 }
 
 jQuery(async () => {
-    await mountSettingsDrawer();
+    try {
+        await mountSettingsDrawer();
+    } catch (error) {
+        console.error('Spendbook: failed to mount the settings drawer.', error);
+    }
 });

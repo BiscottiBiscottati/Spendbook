@@ -5,7 +5,6 @@
     "css": "styles/spendbook.css",
     "version": "1.0.0",
     "author": "BiscottiBiscottati",
-    "homePage": "https://github.com/BiscottiBiscottati/Spendbook",
     "description": "Token, cost and cache accounting for your chats: observes chat-completion requests and keeps a usage ledger.",
     "auto_update": true
 }

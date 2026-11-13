@@ -7,6 +7,8 @@
  * namespace and never re-assign the shared `extension_settings` object.
  */
 
+const SETTINGS_NAMESPACE = 'spendbook';
+
 const EMPTY_PRICE_TABLE = Object.freeze({
     currency: 'USD',
     updated: '',
@@ -39,7 +41,7 @@ function readPriceTable(saved) {
     return {
         currency: table.currency ?? EMPTY_PRICE_TABLE.currency,
         updated: table.updated ?? EMPTY_PRICE_TABLE.updated,
-        entries: Array.isArray(table.entries) ? table.entries : [],
+        entries: Array.isArray(table.entries) ? table.entries.map(entry => ({ ...entry })) : [],
     };
 }
 
@@ -49,7 +51,9 @@ function readPriceTable(saved) {
  * @returns {SpendbookSettings}
  */
 export function readSpendbookSettings(extensionSettings = {}) {
-    const saved = isPlainObject(extensionSettings.spendbook) ? extensionSettings.spendbook : {};
+    const saved = isPlainObject(extensionSettings[SETTINGS_NAMESPACE])
+        ? extensionSettings[SETTINGS_NAMESPACE]
+        : {};
 
     return {
         trackingEnabled: saved.trackingEnabled ?? false,
@@ -66,9 +70,9 @@ export function readSpendbookSettings(extensionSettings = {}) {
  * @returns {boolean} The stored value
  */
 export function setTrackingEnabled(extensionSettings, trackingEnabled) {
-    if (!isPlainObject(extensionSettings.spendbook)) {
-        extensionSettings.spendbook = {};
+    if (!isPlainObject(extensionSettings[SETTINGS_NAMESPACE])) {
+        extensionSettings[SETTINGS_NAMESPACE] = {};
     }
-    extensionSettings.spendbook.trackingEnabled = Boolean(trackingEnabled);
-    return extensionSettings.spendbook.trackingEnabled;
+    extensionSettings[SETTINGS_NAMESPACE].trackingEnabled = Boolean(trackingEnabled);
+    return extensionSettings[SETTINGS_NAMESPACE].trackingEnabled;
 }
