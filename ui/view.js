@@ -9,7 +9,7 @@
 
 import { USAGE_ORIGINS } from '../src/origin.js';
 import { resolveUsageCost } from '../src/prices.js';
-import { isCompletedUsageRecord, sumUsageRecords } from '../src/stats.js';
+import { coverageFor, hitRateFor, isCompletedUsageRecord, sumUsageRecords } from '../src/stats.js';
 
 const PLACEHOLDER = '—';
 const NUMBER_FORMAT = new Intl.NumberFormat('en-US');
@@ -20,8 +20,21 @@ const REPORTED_FORMAT = new Intl.NumberFormat('en-US', {
     maximumFractionDigits: 8,
 });
 const COST_FORMATTERS = new Map();
+const PERCENT_FORMAT = new Intl.NumberFormat('en-US', {
+    style: 'percent',
+    maximumFractionDigits: 1,
+});
 
 const KNOWN_ORIGINS = new Set(Object.values(USAGE_ORIGINS));
+
+// The cards read in the order the origins are listed, so a comparison between
+// them does not move around as requests arrive.
+const ORIGIN_ORDER = Object.values(USAGE_ORIGINS);
+const ORIGIN_CARD_TITLES = Object.freeze({
+    [USAGE_ORIGINS.STORY]: 'Story',
+    [USAGE_ORIGINS.QUIET]: 'Quiet',
+    [USAGE_ORIGINS.INTERNAL]: 'Internal',
+});
 
 const STATUS_LABELS = Object.freeze({
     ok: 'ok',
@@ -36,7 +49,6 @@ const SOURCE_LABELS = Object.freeze({
     unavailable: 'unavailable',
 });
 
-
 /**
  * Turns ledger records and observer state into the labels the drawer renders.
  *
@@ -46,14 +58,14 @@ const SOURCE_LABELS = Object.freeze({
  * @param {object|null} [options.health] Observer health counters, when installed.
  * @param {{limit: number, retained: number, total: number}|null} [options.retention] Row counts for the active chat.
  * @param {{totals: object, chats: number}|null} [options.allTime] Cross-chat aggregate.
- * @param {{total: object}|null} [options.archive] Counters of the rows the retention cap folded.
+ * @param {{total?: object, byOrigin?: object, byModel?: object}|null} [options.archive] Counters of the rows the retention cap folded.
  * @param {import('../src/prices.js').UsagePriceTable|null} [options.prices] User-entered price table.
  * @returns {{
  *   trackingEnabled: boolean,
  *   health: {state: string, label: string},
  *   retention: {limit: number, retained: number, total: number, folded: number, label: string},
  *   allTime: {requests: number, excluded: number, chats: number, label: string},
- *   totals: object,
+ *   cards: object[],
  *   empty: boolean,
  *   emptyMessage: string,
  *   rows: object[],
@@ -75,7 +87,7 @@ export function buildUsageView({
         health: describeObserverHealth({ trackingEnabled, health }),
         retention: describeRetention(retention),
         allTime: describeAllTime(allTime, { hasPrices: hasPriceEntries(prices) }),
-        totals: describeUsageTotals({ records, archive, prices }),
+        cards: buildCards(sumUsageRecords({ records, archive, prices }), prices),
         empty: rows.length === 0,
         emptyMessage: trackingEnabled
             ? 'No requests recorded yet. Send a message with tracking on to start the table.'
@@ -165,70 +177,189 @@ export function describeAllTime(allTime = {}, { hasPrices = false } = {}) {
 }
 
 /**
- * The chat's own total: the visible rows folded with the price table the user
- * has now, plus the price inputs of the rows the retention cap folded earlier.
- * Editing or deleting a price row therefore reprices the whole chat, folded
- * rows included.
+ * The cards above the table: one for the whole chat, then one per origin that
+ * completed a request, in a fixed order. A card is built from the same summary
+ * the rows are — visible rows folded with the rows the retention cap evicted and
+ * priced with the table in force now — so the card and the table can never
+ * describe different requests.
  *
- * Dollars stay split by source: a provider-reported figure is reported credits,
- * not the table's currency, so it is never added to a table-derived one.
- *
- * @param {object} [options]
- * @param {object[]} [options.records] Retained records for one chat.
- * @param {{total?: object}|null} [options.archive] Counters of the folded rows.
- * @param {import('../src/prices.js').UsagePriceTable|null} [options.prices]
- * @returns {{
- *   requests: number,
- *   excluded: number,
- *   promptTokens: number,
- *   estimatedPromptTokens: number,
- *   cost: {measured: number, measuredRequests: number, estimated: number, estimatedRequests: number, requests: number},
- *   saving: {measured: number, measuredRequests: number, estimated: number, estimatedRequests: number, requests: number},
- *   label: string,
- * }}
+ * @param {{counters: object, cost: object, saving: object, byOrigin: object}} usage
+ * @param {import('../src/prices.js').UsagePriceTable|null} prices
+ * @returns {object[]}
  */
-export function describeUsageTotals({ records = [], archive = null, prices = null } = {}) {
-    const { counters, cost, saving } = sumUsageRecords({ records, archive, prices });
-    const requests = toCount(counters.requests);
-    const excluded = toCount(counters.excludedRequests);
-    const promptTokens = toCount(counters.promptTokens);
-    const estimatedPromptTokens = toCount(counters.estimatedPromptTokens);
-    // The one fallback for a missing currency lives in formatCost.
-    const currency = prices?.currency;
-
-    const summary = {
-        requests,
-        excluded,
-        promptTokens,
-        estimatedPromptTokens,
-        cost,
-        saving,
-        label: '',
-    };
-    if (requests + excluded === 0) return summary;
-
-    const head = requests > 0
-        ? formatCountLabel(requests, 'completed request')
-        : formatCountLabel(excluded, 'failed or stopped request');
-    const stopped = requests > 0 && excluded > 0 ? ` and ${formatCount(excluded)} failed or stopped` : '';
-    const parts = [`This chat: ${head}${stopped}`];
-    if (promptTokens > 0) parts.push(`${formatCount(promptTokens)} prompt tokens`);
-    if (estimatedPromptTokens > 0) parts.push(`${formatCount(estimatedPromptTokens)} estimated prompt tokens`);
-
-    const costAmount = describeDollars(cost, currency);
-    if (costAmount) parts.push(`${costAmount} cost${coverageFor(cost, requests)}`);
-    const savingAmount = describeDollars(saving, currency);
-    if (savingAmount) parts.push(`${savingAmount} cache saving${coverageFor(saving, requests)}`);
-    if (!costAmount) {
-        parts.push(describeMissingCost({ prices, promptTokens }));
+function buildCards(usage, prices) {
+    const cards = [];
+    // A chat whose only requests failed still has rows in the table, so the
+    // overall card reports them: the numbers above the table never leave a row
+    // unaccounted for.
+    if (toCount(usage.counters.requests) + toCount(usage.counters.excludedRequests) > 0) {
+        cards.push(buildCard('all', usage, prices));
     }
 
-    summary.label = `${parts.join(' · ')}.`;
-    return summary;
+    for (const origin of ORIGIN_ORDER) {
+        const summary = usage.byOrigin[origin];
+        // An origin whose only rows failed has nothing to report: its failures
+        // are counted on the overall card and it is out of every denominator.
+        if (!summary || toCount(summary.counters.requests) === 0) continue;
+        cards.push(buildCard(origin, summary, prices));
+    }
+    return cards;
 }
 
 /**
- * Why a total has no cost. The three reasons read differently because they ask
+ * One card. Every metric carries the source of its number, so an unavailable
+ * figure is drawn as a placeholder and a reader is never handed a confident
+ * zero the provider never sent.
+ *
+ * @param {string} scope 'all' or an origin
+ * @param {{counters: object, cost: object, saving: object}} summary
+ * @param {import('../src/prices.js').UsagePriceTable|null} prices
+ * @returns {object}
+ */
+function buildCard(scope, summary, prices) {
+    const counters = summary.counters;
+    const requests = toCount(counters.requests);
+    const excluded = toCount(counters.excludedRequests);
+    const measuredPrompt = toCount(counters.promptTokens);
+    const estimatedPrompt = toCount(counters.estimatedPromptTokens);
+    const knownPrompt = measuredPrompt + estimatedPrompt;
+    const currency = prices?.currency;
+    const rate = hitRateFor(counters);
+    const coverage = coverageFor(counters);
+    const cost = describeDollars(summary.cost, currency);
+    const saving = describeDollars(summary.saving, currency);
+
+    // A chat with no completed request has only failures to report, so its
+    // header carries them instead of claiming zero completed requests.
+    const head = requests > 0
+        ? formatCountLabel(requests, 'completed request')
+        : formatCountLabel(excluded, 'failed or stopped request');
+    const stopped = requests > 0 && excluded > 0 ? formatCountLabel(excluded, 'failed or stopped request') : '';
+
+    return {
+        scope,
+        title: scope === 'all' ? 'This chat' : ORIGIN_CARD_TITLES[scope],
+        requestsLabel: head,
+        detailLabel: stopped,
+        // A card with no money says why: a metric showing a placeholder leaves
+        // the reader to guess whether the table or the provider is at fault. A
+        // chat with no completed request has no cost to explain.
+        note: cost || requests === 0 ? '' : describeMissingCost({ prices, promptTokens: measuredPrompt }),
+        metrics: [
+            promptMetric(counters, { measuredPrompt, estimatedPrompt }),
+            tokenMetric('cached', 'Cached', counters.hitTokens, counters.ratedRequests),
+            {
+                key: 'hitRate',
+                label: 'Hit rate',
+                value: formatPercent(rate),
+                source: rate == null ? 'unavailable' : 'measured',
+                note: ratedNote(counters, knownPrompt),
+            },
+            tokenMetric('completion', 'Completion', counters.completionTokens, counters.completionTokenRequests),
+            tokenMetric('total', 'Total tokens', counters.totalTokens, counters.totalTokenRequests),
+            {
+                key: 'coverage',
+                label: 'Coverage',
+                value: formatPercent(coverage),
+                source: coverage == null
+                    ? 'unavailable'
+                    : (estimatedPrompt > 0 || counters.unavailableRequests > 0 ? 'estimated' : 'measured'),
+                note: '',
+            },
+            dollarsMetric('cost', 'Cost', summary.cost, requests, cost),
+            dollarsMetric('saving', 'Cache saving', summary.saving, requests, saving),
+        ],
+    };
+}
+
+/**
+ * The prompt column: the provider's own count when it sent one, the tokenizer's
+ * estimate marked with a tilde when it did not, and the estimate as a note when
+ * both exist — one number must never read as the other.
+ *
+ * @param {object} counters
+ * @param {{measuredPrompt: number, estimatedPrompt: number}} prompts
+ * @returns {object}
+ */
+function promptMetric(counters, { measuredPrompt, estimatedPrompt }) {
+    const reported = toCount(counters.coveredRequests) > 0;
+    const estimatedLabel = `~${formatCount(estimatedPrompt)}`;
+
+    return {
+        key: 'prompt',
+        label: 'Prompt',
+        value: reported
+            ? formatCount(measuredPrompt)
+            : (estimatedPrompt > 0 ? estimatedLabel : PLACEHOLDER),
+        source: reported ? 'measured' : (estimatedPrompt > 0 ? 'estimated' : 'unavailable'),
+        note: reported && estimatedPrompt > 0 ? `${estimatedLabel} estimated` : '',
+    };
+}
+
+/**
+ * One token column: the sum of the counts that arrived, and a placeholder when
+ * none did. A total of zero from no requests counted is not the same statement
+ * as a zero the provider reported.
+ *
+ * @param {string} key
+ * @param {string} label
+ * @param {number} total
+ * @param {number} countedRequests Requests that reported this count
+ * @returns {object}
+ */
+function tokenMetric(key, label, total, countedRequests) {
+    // The count says how many requests reported this number, and the sum says
+    // they did: a persisted counter from an older shape can lack the count but
+    // never the total it already carried.
+    const counted = toCount(countedRequests) > 0 || total > 0;
+    return {
+        key,
+        label,
+        value: counted ? formatCount(total) : PLACEHOLDER,
+        source: counted ? 'measured' : 'unavailable',
+        note: '',
+    };
+}
+
+/**
+ * One dollar column. A provider-reported figure and a table-derived one are
+ * shown exactly as `describeDollars` wrote them — side by side, never added —
+ * and the note says how many requests the figure covers.
+ *
+ * @param {string} key
+ * @param {string} label
+ * @param {{measured: number, measuredRequests: number, estimated: number, estimatedRequests: number, requests: number}} figures
+ * @param {number} requests
+ * @param {string|null} value
+ * @returns {object}
+ */
+function dollarsMetric(key, label, figures, requests, value) {
+    const covered = figures.requests > 0;
+    return {
+        key,
+        label,
+        value: value ?? PLACEHOLDER,
+        source: !covered ? 'unavailable' : (figures.estimatedRequests > 0 ? 'estimated' : 'measured'),
+        note: describeDollarCoverage(figures, requests),
+    };
+}
+
+/**
+ * How much of the prompt the hit rate was computed over, when it is not all of
+ * it: a rate over part of a set must not look like the rate of the whole set.
+ *
+ * @param {object} counters
+ * @param {number} knownPrompt Reported plus estimated prompt tokens
+ * @returns {string}
+ */
+function ratedNote(counters, knownPrompt) {
+    const rated = toCount(counters.ratedPromptTokens);
+    if (rated === 0 || rated >= knownPrompt) return '';
+    return `${formatCount(rated)} of ${formatCount(knownPrompt)} prompt tokens`;
+}
+
+/**
+ * Why a card has no cost. The three reasons read differently because they ask
  * the user for different things: a price row, or a request that reports its
  * prompt tokens at all.
  *
@@ -272,9 +403,9 @@ function describeDollars(figures, currency) {
  * @param {number} requests
  * @returns {string}
  */
-function coverageFor(figures, requests) {
+function describeDollarCoverage(figures, requests) {
     if (figures.requests >= requests) return '';
-    return ` for ${formatCount(figures.requests)} of ${formatCount(requests)} requests`;
+    return `for ${formatCount(figures.requests)} of ${formatCount(requests)} requests`;
 }
 
 /**
@@ -398,6 +529,10 @@ function formatLatency(latencyMs) {
 
 function formatCount(value) {
     return Number.isFinite(value) ? NUMBER_FORMAT.format(value) : PLACEHOLDER;
+}
+
+function formatPercent(value) {
+    return Number.isFinite(value) ? PERCENT_FORMAT.format(value) : PLACEHOLDER;
 }
 
 function formatCountLabel(count, noun) {

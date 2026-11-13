@@ -385,6 +385,63 @@ describe('Spendbook drawer — reset actions', () => {
     });
 });
 
+describe('Spendbook drawer — cards and help', () => {
+    beforeEach(() => {
+        document.body.innerHTML = '';
+    });
+
+    it('draws the numbers above the table as one card per scope', () => {
+        const { container } = mount({
+            settings: { trackingEnabled: true, prices: ACME_PRICES },
+            getSnapshot: () => ({
+                records: [pricedRow()],
+                trackingEnabled: true,
+                health: { captured: 1 },
+                retention: null,
+                allTime: null,
+                archive: null,
+            }),
+        });
+        const cards = [...container.querySelectorAll('.spendbook-card')];
+
+        expect(cards.map((card) => card.dataset.scope)).toEqual(['all', 'story']);
+        expect(cards[0].querySelector('.spendbook-card-title').textContent).toBe('This chat');
+        expect(cards[1].querySelector('.spendbook-card-title').textContent).toBe('Story');
+        expect(cards[0].textContent).toContain('1 completed request');
+        expect(cards[0].textContent).toContain('$0.00032520');
+        expect(cards[0].textContent).toContain('33.3%');
+    });
+
+    it('draws an unavailable metric as a placeholder, not as a zero', () => {
+        const { container } = mount({
+            settings: { trackingEnabled: true },
+            getSnapshot: () => ({
+                records: [row({ usageSource: 'unavailable', promptTokens: null, completionTokens: null })],
+                trackingEnabled: true,
+                health: { captured: 1 },
+            }),
+        });
+
+        const values = [...container.querySelectorAll('.spendbook-metric-prompt .spendbook-metric-value')];
+        expect(values).toHaveLength(2);
+        for (const value of values) expect(value.textContent).toBe('—');
+    });
+
+    it('explains measured, estimated, unavailable, the hit rate and coverage', () => {
+        const { container } = mount({ settings: { trackingEnabled: true } });
+        const help = container.querySelector('.spendbook-help');
+
+        expect(help.textContent).toMatch(/Measured: the provider reported/);
+        expect(help.textContent).toMatch(/Estimated: the provider reported no usage/);
+        expect(help.textContent).toMatch(/tokenizer/);
+        expect(help.textContent).toMatch(/Unavailable: neither the provider nor the tokenizer/);
+        expect(help.textContent).toMatch(/never as 0/);
+        expect(help.textContent).toMatch(/token-weighted/);
+        expect(help.textContent).toMatch(/Coverage: the share of prompt tokens/);
+        expect(help.textContent).toMatch(/reported no prompt count at all/);
+    });
+});
+
 describe('Spendbook drawer — cost', () => {
     const prices = ACME_PRICES;
 
@@ -401,7 +458,7 @@ describe('Spendbook drawer — cost', () => {
         const [rendered] = container.querySelectorAll('.spendbook-rows tr');
         expect(rendered.querySelector('.spendbook-cell-cost').textContent).toBe('—');
         expect(rendered.querySelector('.spendbook-cell-saving').textContent).toBe('—');
-        expect(container.querySelector('.spendbook-totals').textContent).toMatch(/no cost — the price table is empty\.$/);
+        expect(container.querySelector('.spendbook-cards').textContent).toMatch(/no cost — the price table is empty$/);
         expect(container.querySelectorAll('.spendbook-price-rows tr')).toHaveLength(0);
     });
 
@@ -414,8 +471,10 @@ describe('Spendbook drawer — cost', () => {
         const [rendered] = container.querySelectorAll('.spendbook-rows tr');
         expect(rendered.querySelector('.spendbook-cell-cost').textContent).toBe('$0.00032520');
         expect(rendered.querySelector('.spendbook-cell-saving').textContent).toBe('$0.00005880');
-        expect(container.querySelector('.spendbook-totals').textContent)
-            .toContain('$0.00032520 cost · $0.00005880 cache saving');
+        expect(container.querySelector('.spendbook-card[data-scope="all"]').textContent)
+            .toContain('$0.00032520');
+        expect(container.querySelector('.spendbook-card[data-scope="all"]').textContent)
+            .toContain('$0.00005880');
     });
 
     it('repaints the results from an edited price without replacing the field being edited', () => {
@@ -463,7 +522,7 @@ describe('Spendbook drawer — cost', () => {
         expect(onPricesChange.mock.calls[0][0].entries).toHaveLength(0);
         expect(container.querySelectorAll('.spendbook-price-rows tr')).toHaveLength(0);
         expect(container.querySelector('.spendbook-cell-cost').textContent).toBe('—');
-        expect(container.querySelector('.spendbook-totals').textContent).toMatch(/no cost — the price table is empty/);
+        expect(container.querySelector('.spendbook-cards').textContent).toMatch(/no cost — the price table is empty/);
     });
 
     it('clears a price field it cannot read, so the field never claims a rate', () => {
@@ -483,7 +542,7 @@ describe('Spendbook drawer — cost', () => {
         // The 400 hit tokens can no longer be priced, and the drawer says so
         // instead of showing a confident number.
         expect(container.querySelector('.spendbook-cell-cost').textContent).toBe('—');
-        expect(container.querySelector('.spendbook-totals').textContent).toMatch(/no cost — no complete price row for these requests/);
+        expect(container.querySelector('.spendbook-cards').textContent).toMatch(/no cost — no complete price row for these requests/);
     });
 
     it('stores the currency the user types', () => {

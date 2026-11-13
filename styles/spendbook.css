@@ -20,12 +20,103 @@
     font-size: 0.9em;
 }
 
-.spendbook-totals,
 .spendbook-alltime,
 .spendbook-retention {
     margin: 6px 0;
     color: var(--SmartThemeEmColor);
     font-size: 0.9em;
+}
+
+/* One card per scope above the table; they wrap instead of shrinking to one
+   unreadable column. */
+.spendbook-cards {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 6px 0;
+}
+
+.spendbook-card {
+    flex: 1 1 14rem;
+    min-width: 12rem;
+    padding: 6px 8px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+    font-size: 0.9em;
+}
+
+.spendbook-card-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 4px;
+}
+
+.spendbook-card-title {
+    margin: 0;
+    font-size: 0.95em;
+    font-weight: 600;
+}
+
+.spendbook-card-counts {
+    color: var(--SmartThemeEmColor);
+    font-size: 0.85em;
+}
+
+.spendbook-card-metrics {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 2px 8px;
+    margin: 4px 0 0;
+}
+
+.spendbook-metric {
+    min-width: 0;
+}
+
+.spendbook-metric dt {
+    color: var(--SmartThemeEmColor);
+    font-size: 0.85em;
+}
+
+.spendbook-metric dd {
+    margin: 0;
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+}
+
+/* An estimated or unavailable figure reads quieter than a measured one. */
+.spendbook-metric[data-source="estimated"] dd,
+.spendbook-metric[data-source="unavailable"] dd {
+    color: var(--SmartThemeEmColor);
+}
+
+.spendbook-metric-note,
+.spendbook-card-note {
+    display: block;
+    color: var(--SmartThemeEmColor);
+    font-size: 0.8em;
+}
+
+.spendbook-card-note {
+    margin-top: 6px;
+}
+
+.spendbook-help {
+    margin-top: 12px;
+}
+
+.spendbook-help h4 {
+    margin: 0 0 4px;
+}
+
+.spendbook-help ul {
+    margin: 0;
+    padding-left: 18px;
+    color: var(--SmartThemeEmColor);
+    font-size: 0.9em;
+    line-height: 1.4;
 }
 
 .spendbook-actions {

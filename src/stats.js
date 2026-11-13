@@ -30,8 +30,10 @@ const ACCUMULATOR_FIELDS = Object.freeze([
     'ratedPromptTokens',
     'cacheWriteTokens',
     'completionTokens',
+    'completionTokenRequests',
     'reasoningTokens',
     'totalTokens',
+    'totalTokenRequests',
 ]);
 
 import { USAGE_ORIGINS } from './origin.js';
@@ -107,10 +109,59 @@ export function addRecordToUsageAccumulator(accumulator, record) {
     // adds nothing. Cache writes are kept because the price table bills them at
     // their own rate, and a folded row must price like a visible one.
     if (isNonNegativeNumber(record.cacheWriteTokens)) accumulator.cacheWriteTokens += record.cacheWriteTokens;
-    if (isNonNegativeNumber(record.completionTokens)) accumulator.completionTokens += record.completionTokens;
+    if (isNonNegativeNumber(record.completionTokens)) {
+        accumulator.completionTokens += record.completionTokens;
+        accumulator.completionTokenRequests += 1;
+    }
     if (isNonNegativeNumber(record.reasoningTokens)) accumulator.reasoningTokens += record.reasoningTokens;
-    if (isNonNegativeNumber(record.totalTokens)) accumulator.totalTokens += record.totalTokens;
+    if (isNonNegativeNumber(record.totalTokens)) {
+        accumulator.totalTokens += record.totalTokens;
+        accumulator.totalTokenRequests += 1;
+    }
     return accumulator;
+}
+
+/**
+ * The cache-hit rate of a set of requests: cached prompt tokens over the
+ * provider-reported prompt tokens of the requests that reported both counts.
+ *
+ * Token-weighted on purpose. The mean of per-request percentages would let one
+ * small turn outvote a large one, so the percentage would not match what was
+ * billed. A row missing either count is left out of both the numerator and the
+ * denominator rather than counted as a miss.
+ *
+ * @param {object|null} counters
+ * @returns {number|null} 0..1, or null when no request carried both counts
+ */
+export function hitRateFor(counters) {
+    const counts = normalizeUsageAccumulator(counters);
+    if (counts.ratedPromptTokens <= 0) return null;
+    return counts.hitTokens / counts.ratedPromptTokens;
+}
+
+/**
+ * The share of prompt tokens the provider actually reported.
+ *
+ * An estimate is prompt the provider did not describe, so it counts as
+ * uncovered. Failed and aborted requests are already outside the completed
+ * counters, so they never enter a denominator. A completed request that
+ * reported no prompt size at all caps the figure at the share of requests that
+ * did report one: the missing prompt has a size, it is just unknown, so the
+ * data cannot claim full coverage.
+ *
+ * @param {object|null} counters
+ * @returns {number|null} 0..1, or null when nothing has a prompt size yet
+ */
+export function coverageFor(counters) {
+    const counts = normalizeUsageAccumulator(counters);
+    const knownPromptTokens = counts.promptTokens + counts.estimatedPromptTokens;
+    if (knownPromptTokens <= 0) return null;
+
+    const tokenShare = counts.promptTokens / knownPromptTokens;
+    const requestShare = counts.unavailableRequests > 0 && counts.requests > 0
+        ? counts.coveredRequests / counts.requests
+        : 1;
+    return Math.min(1, tokenShare, requestShare);
 }
 
 /**
@@ -156,8 +207,8 @@ export function isUsageAccumulatorEmpty(accumulator) {
 /**
  * The per-chat archive of the rows the retention cap has evicted: token
  * counters overall, per origin and per configuration label; the price inputs —
- * token counts per provider and model — and the dollars a provider reported,
- * which no price table can reproduce.
+ * token counts per provider, model and origin — and the dollars a provider
+ * reported, which no price table can reproduce.
  *
  * @returns {{total: object, byOrigin: object, byConfiguration: object, byModel: object}}
  */
@@ -178,7 +229,13 @@ export function normalizeUsageArchive(value) {
 
     for (const [origin, counters] of Object.entries(value.byOrigin ?? {})) {
         if (!counters || typeof counters !== 'object') continue;
-        archive.byOrigin[origin] = normalizeUsageAccumulator(counters);
+        // The same rule as a record's origin: an unknown key is background work
+        // rather than a new group, so the groups stay one fixed vocabulary and a
+        // persisted key cannot invent an origin.
+        const known = normalizeUsageOrigin(origin);
+        archive.byOrigin[known] = archive.byOrigin[known]
+            ? mergeUsageAccumulators(archive.byOrigin[known], counters)
+            : normalizeUsageAccumulator(counters);
     }
     for (const [key, entry] of Object.entries(value.byConfiguration ?? {})) {
         if (!entry || typeof entry !== 'object') continue;
@@ -187,9 +244,13 @@ export function normalizeUsageArchive(value) {
             accumulator: normalizeUsageAccumulator(entry.accumulator),
         };
     }
-    for (const [key, entry] of Object.entries(value.byModel ?? {})) {
+    for (const entry of Object.values(value.byModel ?? {})) {
         if (!entry || typeof entry !== 'object') continue;
-        archive.byModel[key] = normalizeModelBucket(entry);
+        // The key is rebuilt from the fields the bucket carries, so a persisted
+        // key that disagrees with them cannot hide a group, and two entries
+        // that describe one group are merged rather than one overwriting the
+        // other.
+        modelBucketSlot(archive.byModel, normalizeModelBucket(entry));
     }
     return archive;
 }
@@ -246,15 +307,8 @@ export function mergeUsageArchives(left, right) {
             entry.accumulator,
         );
     }
-    for (const [key, bucket] of Object.entries(source.byModel)) {
-        const merged = target.byModel[key] ?? createModelBucket(bucket.provider, bucket.model);
-        merged.unpricedCost = mergeUsageAccumulators(merged.unpricedCost, bucket.unpricedCost);
-        merged.unpricedSaving = mergeUsageAccumulators(merged.unpricedSaving, bucket.unpricedSaving);
-        merged.reportedCost += bucket.reportedCost;
-        merged.reportedCostRequests += bucket.reportedCostRequests;
-        merged.reportedSaving += bucket.reportedSaving;
-        merged.reportedSavingRequests += bucket.reportedSavingRequests;
-        target.byModel[key] = merged;
+    for (const bucket of Object.values(source.byModel)) {
+        modelBucketSlot(target.byModel, bucket);
     }
     return target;
 }
@@ -284,79 +338,141 @@ export function isUsageArchiveEmpty(archive) {
 
 /**
  * The whole picture for one chat: visible rows plus the folded counters, with
- * every dollar figure resolved against the given price table. Dollars stay
- * split by source — a provider-reported amount and a table-derived one are not
- * the same unit and are never added together here.
+ * every dollar figure resolved against the given price table — overall and per
+ * origin, so a card above the table describes the same requests the table below
+ * it shows, including the rows the retention cap folded. Dollars stay split by
+ * source — a provider-reported amount and a table-derived one are not the same
+ * unit and are never added together here.
  *
  * @param {object} [options]
  * @param {object[]} [options.records] Retained records for one chat.
- * @param {{total?: object, byModel?: object}|null} [options.archive] Counters of the folded rows.
+ * @param {{total?: object, byOrigin?: object, byModel?: object}|null} [options.archive] Counters of the folded rows.
  * @param {import('./prices.js').UsagePriceTable|null} [options.prices] Table in force now
  * @returns {{
  *   counters: object,
  *   cost: {measured: number, measuredRequests: number, estimated: number, estimatedRequests: number, requests: number},
  *   saving: {measured: number, measuredRequests: number, estimated: number, estimatedRequests: number, requests: number},
+ *   byOrigin: Object<string, {counters: object, cost: object, saving: object}>,
  * }}
  */
 export function sumUsageRecords({ records = [], archive = null, prices = null } = {}) {
-    const counters = createUsageAccumulator();
-    const cost = createDollarTotals();
-    const saving = createDollarTotals();
+    const overall = createSummaryTotals();
+    const byOrigin = new Map();
 
     for (const record of Array.isArray(records) ? records : []) {
-        addRecordToUsageAccumulator(counters, record);
-        if (!isCompletedUsageRecord(record)) continue;
-        const resolved = resolveUsageCost(record, prices);
-        addDollarFigure(cost, resolved.cost, resolved.costSource);
-        addDollarFigure(saving, resolved.saving, resolved.savingSource);
+        const origin = normalizeUsageOrigin(record?.origin);
+        addRecordToSummaries([overall, summaryFor(byOrigin, origin)], record, prices);
     }
 
     const folded = normalizeUsageArchive(archive);
+    overall.counters = mergeUsageAccumulators(overall.counters, folded.total);
+    for (const [origin, counters] of Object.entries(folded.byOrigin)) {
+        const summary = summaryFor(byOrigin, origin);
+        summary.counters = mergeUsageAccumulators(summary.counters, counters);
+    }
     for (const bucket of Object.values(folded.byModel)) {
-        addFoldedDollars(bucket, prices, cost, saving);
+        const targets = [overall];
+        // A group folded before the archive recorded origins has no origin to
+        // name, so its dollars stay in the overall total rather than being
+        // attributed to a guess.
+        if (bucket.origin) targets.push(summaryFor(byOrigin, bucket.origin));
+        addFoldedDollars(bucket, prices, targets);
     }
 
     return {
-        counters: mergeUsageAccumulators(counters, folded.total),
-        cost: finishDollarTotals(cost),
-        saving: finishDollarTotals(saving),
+        counters: overall.counters,
+        cost: finishDollarTotals(overall.cost),
+        saving: finishDollarTotals(overall.saving),
+        byOrigin: Object.fromEntries([...byOrigin].map(([origin, summary]) => [origin, {
+            counters: summary.counters,
+            cost: finishDollarTotals(summary.cost),
+            saving: finishDollarTotals(summary.saving),
+        }])),
     };
 }
 
 /**
- * Adds one folded model group's dollars: the amounts the provider reported, plus
- * the table's price for the rows that reported nothing.
+ * One group's running totals: the counters, and the two dollar figures kept
+ * apart by source.
+ *
+ * @returns {{counters: object, cost: object, saving: object}}
+ */
+function createSummaryTotals() {
+    return { counters: createUsageAccumulator(), cost: createDollarTotals(), saving: createDollarTotals() };
+}
+
+/**
+ * One origin's summary, created on first use so a group that only appears in
+ * the archive or only in the rows is priced like any other.
+ *
+ * @param {Map<string, object>} byOrigin
+ * @param {string} origin
+ * @returns {object}
+ */
+function summaryFor(byOrigin, origin) {
+    if (!byOrigin.has(origin)) byOrigin.set(origin, createSummaryTotals());
+    return byOrigin.get(origin);
+}
+
+/**
+ * Folds one record into every group it belongs to — the overall total and its
+ * origin — resolving its dollars once.
+ *
+ * @param {object[]} targets
+ * @param {object} record
+ * @param {import('./prices.js').UsagePriceTable|null} prices
+ */
+function addRecordToSummaries(targets, record, prices) {
+    for (const target of targets) addRecordToUsageAccumulator(target.counters, record);
+    if (!isCompletedUsageRecord(record)) return;
+
+    const resolved = resolveUsageCost(record, prices);
+    for (const target of targets) {
+        addDollarFigure(target.cost, resolved.cost, resolved.costSource);
+        addDollarFigure(target.saving, resolved.saving, resolved.savingSource);
+    }
+}
+
+/**
+ * Adds one folded model group's dollars to every group it belongs to: the
+ * amounts the provider reported, plus the table's price for the rows that
+ * reported nothing.
  *
  * @param {object} bucket
  * @param {import('./prices.js').UsagePriceTable|null} prices
- * @param {object} cost
- * @param {object} saving
+ * @param {object[]} targets
  */
-function addFoldedDollars(bucket, prices, cost, saving) {
-    if (bucket.reportedCostRequests > 0) {
-        cost.measured += bucket.reportedCost;
-        cost.measuredRequests += bucket.reportedCostRequests;
-    }
-    if (bucket.reportedSavingRequests > 0) {
-        saving.measured += bucket.reportedSaving;
-        saving.measuredRequests += bucket.reportedSavingRequests;
+function addFoldedDollars(bucket, prices, targets) {
+    for (const target of targets) {
+        if (bucket.reportedCostRequests > 0) {
+            target.cost.measured += bucket.reportedCost;
+            target.cost.measuredRequests += bucket.reportedCostRequests;
+        }
+        if (bucket.reportedSavingRequests > 0) {
+            target.saving.measured += bucket.reportedSaving;
+            target.saving.measuredRequests += bucket.reportedSavingRequests;
+        }
     }
     if (!prices) return;
 
     // Only rows the estimator can use are folded, and only a group with rows in
     // it is priced: a counter that never arrived must not read as a zero.
     if (bucket.unpricedCost.requests > 0) {
-        const unpriced = resolveUsageCost(asPriceInputs(bucket, bucket.unpricedCost), prices);
-        if (unpriced.cost != null) {
-            cost.estimated += unpriced.cost;
-            cost.estimatedRequests += bucket.unpricedCost.requests;
+        const priced = resolveUsageCost(asPriceInputs(bucket, bucket.unpricedCost), prices);
+        if (priced.cost != null) {
+            for (const target of targets) {
+                target.cost.estimated += priced.cost;
+                target.cost.estimatedRequests += bucket.unpricedCost.requests;
+            }
         }
     }
     if (bucket.unpricedSaving.requests > 0) {
-        const unpriced = resolveUsageCost(asPriceInputs(bucket, bucket.unpricedSaving), prices);
-        if (unpriced.saving != null) {
-            saving.estimated += unpriced.saving;
-            saving.estimatedRequests += bucket.unpricedSaving.requests;
+        const discounted = resolveUsageCost(asPriceInputs(bucket, bucket.unpricedSaving), prices);
+        if (discounted.saving != null) {
+            for (const target of targets) {
+                target.saving.estimated += discounted.saving;
+                target.saving.estimatedRequests += bucket.unpricedSaving.requests;
+            }
         }
     }
 }
@@ -390,9 +506,10 @@ function asPriceInputs(bucket, counters) {
 function addRecordToModelBucket(archive, record) {
     const provider = modelKeyPart(record.provider) || 'unknown';
     const model = modelKeyPart(record.model) || 'unknown';
-    const key = `${provider}\u0000${model}`;
+    const origin = normalizeUsageOrigin(record.origin);
+    const key = modelBucketKey(provider, model, origin);
     if (!archive.byModel) archive.byModel = {};
-    if (!archive.byModel[key]) archive.byModel[key] = createModelBucket(provider, model);
+    if (!archive.byModel[key]) archive.byModel[key] = createModelBucket(provider, model, origin);
     const bucket = archive.byModel[key];
 
     // A row without a reported figure is the one the table has to price — but
@@ -415,14 +532,29 @@ function addRecordToModelBucket(archive, record) {
 }
 
 /**
+ * The key of one provider-and-model group, split per origin as well: a folded
+ * row's dollars have to land on the card of the work that sent it.
+ *
  * @param {string} provider
  * @param {string} model
+ * @param {string|null} origin
+ * @returns {string}
+ */
+function modelBucketKey(provider, model, origin) {
+    return origin ? `${provider}\u0000${model}\u0000${origin}` : `${provider}\u0000${model}`;
+}
+
+/**
+ * @param {string} provider
+ * @param {string} model
+ * @param {string|null} [origin]
  * @returns {object}
  */
-function createModelBucket(provider, model) {
+function createModelBucket(provider, model, origin = null) {
     return {
         provider,
         model,
+        origin,
         unpricedCost: createUsageAccumulator(),
         unpricedSaving: createUsageAccumulator(),
         reportedCost: 0,
@@ -440,6 +572,9 @@ function normalizeModelBucket(entry) {
     const bucket = createModelBucket(
         modelKeyPart(entry.provider) || 'unknown',
         modelKeyPart(entry.model) || 'unknown',
+        // An archive written before origins were recorded has none: null keeps
+        // those dollars in the overall total instead of guessing a card.
+        KNOWN_ORIGINS.has(entry.origin) ? entry.origin : null,
     );
     bucket.unpricedCost = normalizeUsageAccumulator(entry.unpricedCost);
     bucket.unpricedSaving = normalizeUsageAccumulator(entry.unpricedSaving);
@@ -448,6 +583,39 @@ function normalizeModelBucket(entry) {
     bucket.reportedSaving = isNonNegativeNumber(entry.reportedSaving) ? entry.reportedSaving : 0;
     bucket.reportedSavingRequests = isNonNegativeNumber(entry.reportedSavingRequests) ? entry.reportedSavingRequests : 0;
     return bucket;
+}
+
+/**
+ * Puts a model group into a map, merging it with a group that already
+ * describes the same provider, model and origin. The key is rebuilt from the
+ * group's own fields so a persisted key can never disagree with it.
+ *
+ * @param {object} byModel
+ * @param {object} bucket
+ * @returns {object} The same map.
+ */
+function modelBucketSlot(byModel, bucket) {
+    const key = modelBucketKey(bucket.provider, bucket.model, bucket.origin);
+    byModel[key] = byModel[key] ? mergeModelBuckets(byModel[key], bucket) : bucket;
+    return byModel;
+}
+
+/**
+ * Adds one model group to another, for a merge or for two persisted entries
+ * that turned out to describe one group.
+ *
+ * @param {object} target
+ * @param {object} source
+ * @returns {object} The target.
+ */
+function mergeModelBuckets(target, source) {
+    target.unpricedCost = mergeUsageAccumulators(target.unpricedCost, source.unpricedCost);
+    target.unpricedSaving = mergeUsageAccumulators(target.unpricedSaving, source.unpricedSaving);
+    target.reportedCost += source.reportedCost;
+    target.reportedCostRequests += source.reportedCostRequests;
+    target.reportedSaving += source.reportedSaving;
+    target.reportedSavingRequests += source.reportedSavingRequests;
+    return target;
 }
 
 function createDollarTotals() {

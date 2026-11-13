@@ -258,7 +258,7 @@ describe('Spendbook ledger — retention', () => {
 
         const archived = harness.ledger.archivedFor('chat-a');
         expect(archived.total.requests).toBe(1);
-        expect(archived.byModel['acme\u0000m1'].unpricedCost).toMatchObject({
+        expect(archived.byModel['acme\u0000m1\u0000story'].unpricedCost).toMatchObject({
             requests: 1,
             promptTokens: 1000,
             hitTokens: 400,
@@ -269,7 +269,7 @@ describe('Spendbook ledger — retention', () => {
         // price them with whatever table is in force later.
         const reloaded = harness.createLedger();
         reloaded.loadChat('chat-a');
-        expect(reloaded.archivedFor('chat-a').byModel['acme\u0000m1'].unpricedCost.hitTokens).toBe(400);
+        expect(reloaded.archivedFor('chat-a').byModel['acme\u0000m1\u0000story'].unpricedCost.hitTokens).toBe(400);
     });
 
     it('counts every chat in the all-time total', () => {

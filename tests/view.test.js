@@ -6,7 +6,8 @@
 
 import { describe, it, expect } from 'vitest';
 
-import { buildUsageView, describeAllTime, describeUsageTotals } from '../ui/view.js';
+import { buildUsageView, describeAllTime } from '../ui/view.js';
+import { addRecordToUsageArchive, createUsageArchive } from '../src/stats.js';
 import { ACME_PRICES, ACME_PRICED_ROW } from './fixtures/prices.js';
 
 function record(overrides = {}) {
@@ -66,7 +67,118 @@ describe('Spendbook view — failed rows', () => {
 
         expect(view.rows[0].costLabel).toBe('—');
         expect(view.rows[0].savingLabel).toBe('—');
-        expect(view.totals.cost.measured).toBe(0);
+        // It never counted toward a total, so no card prices it — but the card
+        // above the table still accounts for the row.
+        expect(view.cards).toHaveLength(1);
+        expect(metric(view.cards[0], 'cost').value).toBe('—');
+    });
+});
+
+/**
+ * One metric of one card, so a test reads as "the card's cached count" rather
+ * than as an index into an array.
+ */
+function metric(card, key) {
+    return card.metrics.find((entry) => entry.key === key);
+}
+
+describe('Spendbook view — cards', () => {
+    it('draws no card for a chat with no requests', () => {
+        const view = buildUsageView({ records: [], trackingEnabled: true, prices: ACME_PRICES });
+
+        expect(view.cards).toEqual([]);
+        expect(view.empty).toBe(true);
+    });
+
+    it('draws one overall card for one request', () => {
+        const view = buildUsageView({ records: [record()], trackingEnabled: true, prices: ACME_PRICES });
+        const [card] = view.cards;
+
+        expect(view.cards.map((entry) => entry.scope)).toEqual(['all', 'story']);
+        expect(card).toMatchObject({ scope: 'all', title: 'This chat', requestsLabel: '1 completed request', detailLabel: '' });
+        expect(metric(card, 'prompt')).toMatchObject({ value: '1,200', source: 'measured' });
+        expect(metric(card, 'cached')).toMatchObject({ value: '400', source: 'measured' });
+        expect(metric(card, 'hitRate')).toMatchObject({ value: '33.3%', source: 'measured' });
+        expect(metric(card, 'completion')).toMatchObject({ value: '340', source: 'measured' });
+        expect(metric(card, 'coverage')).toMatchObject({ value: '100%', source: 'measured' });
+        expect(metric(card, 'cost')).toMatchObject({ value: '$0.00032520', source: 'estimated' });
+        expect(metric(card, 'saving')).toMatchObject({ value: '$0.00005880', source: 'estimated' });
+    });
+
+    it('counts many requests into one card', () => {
+        const view = buildUsageView({
+            records: [
+                record(),
+                record({ recordId: 'r-2' }),
+                record({ recordId: 'r-3', completionTokens: null, totalTokens: null }),
+            ],
+            trackingEnabled: true,
+            prices: ACME_PRICES,
+        });
+        const [card] = view.cards;
+
+        expect(card.requestsLabel).toBe('3 completed requests');
+        expect(metric(card, 'prompt').value).toBe('3,600');
+        expect(metric(card, 'cached').value).toBe('1,200');
+        expect(metric(card, 'completion').value).toBe('680');
+        expect(metric(card, 'hitRate').value).toBe('33.3%');
+    });
+
+    it('shows an unreported column as a placeholder, never as zero', () => {
+        const view = buildUsageView({
+            records: [record({
+                usageSource: 'unavailable',
+                promptTokens: null,
+                hitTokens: null,
+                completionTokens: null,
+                totalTokens: null,
+            })],
+            trackingEnabled: true,
+            prices: ACME_PRICES,
+        });
+        const [card] = view.cards;
+
+        for (const key of ['prompt', 'cached', 'hitRate', 'completion', 'total', 'coverage', 'cost', 'saving']) {
+            expect(metric(card, key).value).toBe('—');
+        }
+        expect(card.requestsLabel).toBe('1 completed request');
+    });
+
+    it('shows an estimated prompt with its own mark and no invented coverage', () => {
+        const view = buildUsageView({
+            records: [record({
+                usageSource: 'estimated',
+                promptTokens: null,
+                hitTokens: null,
+                completionTokens: null,
+                totalTokens: null,
+                estimatedPromptTokens: 900,
+            })],
+            trackingEnabled: true,
+            prices: ACME_PRICES,
+        });
+        const [card] = view.cards;
+
+        expect(metric(card, 'prompt')).toMatchObject({ value: '~900', source: 'estimated' });
+        expect(metric(card, 'coverage')).toMatchObject({ value: '0%', source: 'estimated' });
+        expect(metric(card, 'hitRate').value).toBe('—');
+        expect(card.note).toBe('no cost — these requests reported no prompt count');
+    });
+
+    it('shows the measured prompt and the estimate beside it', () => {
+        const view = buildUsageView({
+            records: [
+                record(),
+                record({ recordId: 'r-2', usageSource: 'estimated', promptTokens: null, hitTokens: null, estimatedPromptTokens: 240 }),
+            ],
+            trackingEnabled: true,
+            prices: ACME_PRICES,
+        });
+        const [card] = view.cards;
+
+        expect(metric(card, 'prompt')).toMatchObject({ value: '1,200', source: 'measured', note: '~240 estimated' });
+        // 1,200 of 1,440 prompt tokens were reported.
+        expect(metric(card, 'coverage').value).toBe('83.3%');
     });
 });
 
@@ -88,116 +200,143 @@ describe('Spendbook view — all-time line', () => {
     });
 });
 
-describe('Spendbook view — chat totals', () => {
-    it('reports nothing for a chat with no requests', () => {
-        const totals = describeUsageTotals({ records: [], prices: ACME_PRICES });
+describe('Spendbook view — card caveats', () => {
+    it('counts a chat whose only request failed in the overall card', () => {
+        const view = buildUsageView({
+            records: [record({ status: 'error', usageSource: 'unavailable', promptTokens: null, hitTokens: null })],
+            trackingEnabled: true,
+            prices: ACME_PRICES,
+        });
+        const [card] = view.cards;
 
-        expect(totals).toMatchObject({ requests: 0, excluded: 0, label: '' });
-        expect(totals.cost).toEqual({ measured: 0, measuredRequests: 0, estimated: 0, estimatedRequests: 0, requests: 0 });
-        expect(totals.saving).toEqual({ measured: 0, measuredRequests: 0, estimated: 0, estimatedRequests: 0, requests: 0 });
+        // The row is in the table, so the numbers above it must not pretend the
+        // chat is empty; a failed request is in no denominator, so every metric
+        // has no figure to show.
+        expect(view.rows).toHaveLength(1);
+        expect(card).toMatchObject({
+            scope: 'all',
+            requestsLabel: '1 failed or stopped request',
+            detailLabel: '',
+            note: '',
+        });
+        for (const metricEntry of card.metrics) expect(metricEntry.value).toBe('—');
     });
 
-    it('sums the rows into one labelled total', () => {
-        const totals = describeUsageTotals({ records: [record()], prices: ACME_PRICES });
+    it('does not card an origin whose only row failed, but counts it above the table', () => {
+        const view = buildUsageView({
+            records: [
+                record(),
+                record({
+                    recordId: 'r-2',
+                    origin: 'internal',
+                    status: 'error',
+                    usageSource: 'unavailable',
+                    promptTokens: null,
+                    hitTokens: null,
+                }),
+            ],
+            trackingEnabled: true,
+            prices: ACME_PRICES,
+        });
+        const [overall, story] = view.cards;
 
-        expect(totals.requests).toBe(1);
-        expect(totals.promptTokens).toBe(1200);
-        expect(totals.cost.estimated).toBeCloseTo(0.0003252, 12);
-        expect(totals.cost.estimatedRequests).toBe(1);
-        expect(totals.cost.measuredRequests).toBe(0);
-        expect(totals.saving.estimated).toBeCloseTo(0.0000588, 12);
-        expect(totals.label).toBe(
-            'This chat: 1 completed request · 1,200 prompt tokens · $0.00032520 cost · $0.00005880 cache saving.',
-        );
+        expect(view.cards.map((card) => card.scope)).toEqual(['all', 'story']);
+        expect(overall.detailLabel).toBe('1 failed or stopped request');
+        expect(story.detailLabel).toBe('');
+        expect(story.requestsLabel).toBe('1 completed request');
+    });
+
+    it('sums the rows into one card', () => {
+        const [card] = buildUsageView({ records: [record()], trackingEnabled: true, prices: ACME_PRICES }).cards;
+
+        expect(card.requestsLabel).toBe('1 completed request');
+        expect(metric(card, 'prompt').value).toBe('1,200');
+        expect(metric(card, 'cost')).toEqual({ key: 'cost', label: 'Cost', value: '$0.00032520', source: 'estimated', note: '' });
+        expect(metric(card, 'saving').value).toBe('$0.00005880');
     });
 
     it('says the price table is empty instead of showing a zero cost', () => {
-        const totals = describeUsageTotals({ records: [record()], prices: null });
+        const [card] = buildUsageView({ records: [record()], trackingEnabled: true, prices: null }).cards;
 
-        expect(totals.cost.requests).toBe(0);
-        expect(totals.label).toBe(
-            'This chat: 1 completed request · 1,200 prompt tokens · no cost — the price table is empty.',
-        );
+        expect(metric(card, 'cost')).toMatchObject({ value: '—', source: 'unavailable' });
+        expect(card.note).toBe('no cost — the price table is empty');
     });
 
     it('says no price row matched when the table has entries but none for these rows', () => {
-        const totals = describeUsageTotals({ records: [record({ provider: 'other', model: 'm9' })], prices: ACME_PRICES });
+        const [card] = buildUsageView({
+            records: [record({ provider: 'other', model: 'm9' })],
+            trackingEnabled: true,
+            prices: ACME_PRICES,
+        }).cards;
 
-        expect(totals.label).toBe(
-            'This chat: 1 completed request · 1,200 prompt tokens · no cost — no complete price row for these requests.',
-        );
+        expect(metric(card, 'cost').value).toBe('—');
+        expect(card.note).toBe('no cost — no complete price row for these requests');
     });
 
     it('says how many requests the cost covers when a price row is missing', () => {
-        const totals = describeUsageTotals({
+        const [card] = buildUsageView({
             records: [record(), record({ recordId: 'r-2', provider: 'other', model: 'm9' })],
+            trackingEnabled: true,
             prices: ACME_PRICES,
-        });
+        }).cards;
 
-        expect(totals.requests).toBe(2);
-        expect(totals.cost.requests).toBe(1);
-        expect(totals.label).toContain('$0.00032520 cost for 1 of 2 requests');
+        expect(metric(card, 'cost')).toMatchObject({ value: '$0.00032520', note: 'for 1 of 2 requests' });
+        // Or the saving note would let a partial figure look complete.
+        expect(metric(card, 'saving').note).toBe('for 1 of 2 requests');
     });
 
-    it('marks a provider-reported total as reported instead of pricing it', () => {
-        const totals = describeUsageTotals({ records: [record({ cost: 0.42, cacheDiscount: 0.07 })], prices: ACME_PRICES });
+    it('marks a provider-reported amount as reported instead of pricing it', () => {
+        const [card] = buildUsageView({
+            records: [record({ cost: 0.42, cacheDiscount: 0.07 })],
+            trackingEnabled: true,
+            prices: ACME_PRICES,
+        }).cards;
 
-        expect(totals.cost).toMatchObject({ measured: 0.42, measuredRequests: 1, estimated: 0, estimatedRequests: 0 });
-        expect(totals.label).toBe(
-            'This chat: 1 completed request · 1,200 prompt tokens · 0.42 reported cost · 0.07 reported cache saving.',
-        );
+        expect(metric(card, 'cost')).toMatchObject({ value: '0.42 reported', source: 'measured', note: '' });
+        expect(metric(card, 'saving')).toMatchObject({ value: '0.07 reported', source: 'measured' });
+        expect(card.note).toBe('');
     });
 
     it('never adds a reported credit figure to a priced one', () => {
-        const totals = describeUsageTotals({
+        const [card] = buildUsageView({
             records: [record({ recordId: 'r-reported', cost: 0.42, cacheDiscount: 0.07 }), record({ recordId: 'r-priced' })],
+            trackingEnabled: true,
             prices: ACME_PRICES,
-        });
+        }).cards;
 
-        expect(totals.cost.measured).toBe(0.42);
-        expect(totals.cost.estimated).toBeCloseTo(0.0003252, 12);
-        expect(totals.label).toBe(
-            'This chat: 2 completed requests · 2,400 prompt tokens · '
-            + '0.42 reported and $0.00032520 estimated cost · '
-            + '0.07 reported and $0.00005880 estimated cache saving.',
-        );
+        expect(metric(card, 'cost').value).toBe('0.42 reported and $0.00032520 estimated');
+        expect(metric(card, 'cost').source).toBe('estimated');
+        expect(metric(card, 'saving').value).toBe('0.07 reported and $0.00005880 estimated');
     });
 
-    it('says no prompt count was reported rather than blaming the price row', () => {
-        const totals = describeUsageTotals({
-            records: [record({ promptTokens: null, hitTokens: null, usageSource: 'estimated', estimatedPromptTokens: 900 })],
-            prices: ACME_PRICES,
-        });
-
-        expect(totals.label).toBe(
-            'This chat: 1 completed request · 900 estimated prompt tokens · no cost — these requests reported no prompt count.',
-        );
-    });
-
-    it('counts failed requests without inventing a plural', () => {
-        const totals = describeUsageTotals({
+    it('counts failed requests in the card header without inventing a plural', () => {
+        const [card] = buildUsageView({
             records: [
                 record(),
                 record({ recordId: 'r-2', status: 'error', usageSource: 'unavailable', promptTokens: null, hitTokens: null }),
                 record({ recordId: 'r-3', status: 'aborted', usageSource: 'unavailable', promptTokens: null, hitTokens: null }),
             ],
+            trackingEnabled: true,
             prices: ACME_PRICES,
-        });
+        }).cards;
 
-        expect(totals.excluded).toBe(2);
-        expect(totals.label).toContain('1 completed request and 2 failed or stopped ·');
+        expect(card.requestsLabel).toBe('1 completed request');
+        expect(card.detailLabel).toBe('2 failed or stopped requests');
     });
 
-    it('says how many requests a cache saving covers when only some are priced', () => {
-        const totals = describeUsageTotals({
-            records: [record(), record({ recordId: 'r-2', provider: 'other', model: 'm9' })],
+    it('keeps measured and estimated prompt tokens apart and counts the failures', () => {
+        const [card] = buildUsageView({
+            records: [
+                record({ promptTokens: null, hitTokens: null, usageSource: 'estimated', estimatedPromptTokens: 240 }),
+                record({ recordId: 'r-2', status: 'error', usageSource: 'unavailable', promptTokens: null, hitTokens: null, completionTokens: null }),
+            ],
+            trackingEnabled: true,
             prices: ACME_PRICES,
-        });
+        }).cards;
 
-        // Cost and saving both cover one of the two requests; or the saving
-        // note would let a partial figure look complete.
-        expect(totals.label).toContain('$0.00032520 cost for 1 of 2 requests');
-        expect(totals.label).toContain('$0.00005880 cache saving for 1 of 2 requests');
+        expect(metric(card, 'prompt')).toMatchObject({ value: '~240', source: 'estimated' });
+        expect(card.detailLabel).toBe('1 failed or stopped request');
+        expect(card.note).toBe('no cost — these requests reported no prompt count');
     });
 
     it('prices the rows the retention cap folded with the table in force now', () => {
@@ -206,9 +345,10 @@ describe('Spendbook view — chat totals', () => {
         const archive = {
             total: { requests: 1, measuredRequests: 1, promptTokens: 1200, hitTokens: 400, completionTokens: 340 },
             byModel: {
-                'acme\u0000m1': {
+                'acme\u0000m1\u0000story': {
                     provider: 'acme',
                     model: 'm1',
+                    origin: 'story',
                     unpricedCost: { requests: 1, promptTokens: 1200, hitTokens: 400, completionTokens: 340 },
                     unpricedSaving: { requests: 1, promptTokens: 1200, hitTokens: 400, completionTokens: 340 },
                     reportedCost: 0,
@@ -219,21 +359,27 @@ describe('Spendbook view — chat totals', () => {
             },
         };
 
-        const totals = describeUsageTotals({ records: [record({ recordId: 'r-new' })], archive, prices: ACME_PRICES });
+        const [card] = buildUsageView({
+            records: [record({ recordId: 'r-new' })],
+            trackingEnabled: true,
+            archive,
+            prices: ACME_PRICES,
+        }).cards;
 
-        expect(totals.requests).toBe(2);
-        expect(totals.promptTokens).toBe(2400);
-        expect(totals.cost.estimated).toBeCloseTo(0.0006504, 12);
-        expect(totals.saving.estimated).toBeCloseTo(0.0001176, 12);
+        expect(card.requestsLabel).toBe('2 completed requests');
+        expect(metric(card, 'prompt').value).toBe('2,400');
+        expect(metric(card, 'cost').value).toBe('$0.00065040');
+        expect(metric(card, 'saving').value).toBe('$0.00011760');
     });
 
     it('reprices a folded row when the price table changes', () => {
         const archive = {
             total: { requests: 1, measuredRequests: 1, promptTokens: 1200, hitTokens: 400, completionTokens: 340 },
             byModel: {
-                'acme\u0000m1': {
+                'acme\u0000m1\u0000story': {
                     provider: 'acme',
                     model: 'm1',
+                    origin: 'story',
                     unpricedCost: { requests: 1, promptTokens: 1200, hitTokens: 400, completionTokens: 340 },
                     unpricedSaving: { requests: 1, promptTokens: 1200, hitTokens: 400, completionTokens: 340 },
                 },
@@ -245,19 +391,20 @@ describe('Spendbook view — chat totals', () => {
             entries: [{ provider: 'acme', model: 'm1', hit: 0.003, miss: 0.3, output: 0.6, cacheWrite: null }],
         };
 
-        const totals = describeUsageTotals({ records: [], archive, prices: repriced });
+        const [card] = buildUsageView({ records: [], trackingEnabled: true, archive, prices: repriced }).cards;
 
         // 400 * 0.003 + 800 * 0.3 + 340 * 0.6 = 445.2 micro-dollars.
-        expect(totals.cost.estimated).toBeCloseTo(0.0004452, 12);
+        expect(metric(card, 'cost').value).toBe('$0.00044520');
     });
 
     it('keeps a folded provider-reported figure as reported', () => {
         const archive = {
             total: { requests: 1, measuredRequests: 1, promptTokens: 1200 },
             byModel: {
-                'acme\u0000m1': {
+                'acme\u0000m1\u0000story': {
                     provider: 'acme',
                     model: 'm1',
+                    origin: 'story',
                     unpricedCost: {},
                     unpricedSaving: {},
                     reportedCost: 0.42,
@@ -268,29 +415,150 @@ describe('Spendbook view — chat totals', () => {
             },
         };
 
-        const totals = describeUsageTotals({ records: [], archive, prices: ACME_PRICES });
+        const [card] = buildUsageView({ records: [], trackingEnabled: true, archive, prices: ACME_PRICES }).cards;
 
-        expect(totals.cost.measured).toBe(0.42);
-        expect(totals.cost.estimated).toBe(0);
-        expect(totals.saving.measured).toBe(0.07);
-        expect(totals.label).toBe(
-            'This chat: 1 completed request · 1,200 prompt tokens · 0.42 reported cost · 0.07 reported cache saving.',
-        );
+        expect(metric(card, 'cost')).toMatchObject({ value: '0.42 reported', source: 'measured' });
+        expect(metric(card, 'saving')).toMatchObject({ value: '0.07 reported', source: 'measured' });
     });
+});
 
-    it('keeps measured and estimated prompt tokens apart and counts the failures', () => {
-        const totals = describeUsageTotals({
+describe('Spendbook view — per-origin cards', () => {
+    it('draws one card per origin in a fixed order', () => {
+        const view = buildUsageView({
             records: [
-                record({ promptTokens: null, hitTokens: null, usageSource: 'estimated', estimatedPromptTokens: 240 }),
-                record({ recordId: 'r-2', status: 'error', usageSource: 'unavailable', promptTokens: null, hitTokens: null, completionTokens: null }),
+                record({ recordId: 'r-1', origin: 'internal' }),
+                record({ recordId: 'r-2', origin: 'story' }),
+                record({ recordId: 'r-3', origin: 'quiet' }),
             ],
+            trackingEnabled: true,
             prices: ACME_PRICES,
         });
 
-        expect(totals.requests).toBe(1);
-        expect(totals.excluded).toBe(1);
-        expect(totals.label).toBe(
-            'This chat: 1 completed request and 1 failed or stopped · 240 estimated prompt tokens · no cost — these requests reported no prompt count.',
-        );
+        expect(view.cards.map((card) => card.scope)).toEqual(['all', 'story', 'quiet', 'internal']);
+        expect(view.cards.map((card) => card.title)).toEqual(['This chat', 'Story', 'Quiet', 'Internal']);
+    });
+
+    it('agrees with the rows below it, folded rows included', () => {
+        const archive = createUsageArchive();
+        addRecordToUsageArchive(archive, record({
+            ...ACME_PRICED_ROW,
+            recordId: 'r-folded',
+            origin: 'internal',
+            promptTokens: 500,
+            hitTokens: 100,
+            completionTokens: 200,
+        }));
+
+        const view = buildUsageView({
+            records: [record({ recordId: 'r-visible', origin: 'story' })],
+            trackingEnabled: true,
+            archive,
+            prices: ACME_PRICES,
+        });
+        const [overall, story, internal] = view.cards;
+
+        expect(view.cards.map((card) => card.scope)).toEqual(['all', 'story', 'internal']);
+        // The overall card is the two origin cards added up — the visible row
+        // and the row the cap folded.
+        expect(metric(overall, 'prompt').value).toBe('1,700');
+        expect(metric(story, 'prompt').value).toBe('1,200');
+        expect(metric(internal, 'prompt').value).toBe('500');
+        // 100 * 0.003 + 400 * 0.15 + 200 * 0.6 = 180.3 micro-dollars.
+        expect(metric(internal, 'cost').value).toBe('$0.00018030');
+        expect(metric(story, 'cost').value).toBe('$0.00032520');
+        expect(metric(overall, 'cost').value).toBe('$0.00050550');
+    });
+
+    it('keeps a folded row out of an origin that did not send it', () => {
+        const archive = createUsageArchive();
+        addRecordToUsageArchive(archive, record({ ...ACME_PRICED_ROW, recordId: 'r-folded', origin: 'internal' }));
+
+        const view = buildUsageView({
+            records: [record({ recordId: 'r-visible', origin: 'story' })],
+            trackingEnabled: true,
+            archive,
+            prices: ACME_PRICES,
+        });
+        const [, story, internal] = view.cards;
+
+        expect(story.requestsLabel).toBe('1 completed request');
+        expect(metric(story, 'cost').value).toBe('$0.00032520');
+        expect(internal.requestsLabel).toBe('1 completed request');
+        expect(metric(internal, 'cost').value).toBe('$0.00032520');
+    });
+
+    it('counts many requests into the card of their own origin', () => {
+        const view = buildUsageView({
+            records: [
+                record({ recordId: 'r-1' }),
+                record({ recordId: 'r-2' }),
+                record({ recordId: 'r-3', origin: 'internal' }),
+            ],
+            trackingEnabled: true,
+            prices: ACME_PRICES,
+        });
+        const [overall, story, internal] = view.cards;
+
+        expect(view.cards.map((card) => card.scope)).toEqual(['all', 'story', 'internal']);
+        expect(overall.requestsLabel).toBe('3 completed requests');
+        expect(metric(overall, 'prompt').value).toBe('3,600');
+        expect(story.requestsLabel).toBe('2 completed requests');
+        expect(metric(story, 'prompt').value).toBe('2,400');
+        expect(internal.requestsLabel).toBe('1 completed request');
+        expect(metric(internal, 'prompt').value).toBe('1,200');
+    });
+
+    it('shows the output and total an older archive carried without its counts', () => {
+        // A counter persisted before the counts existed still knows its sums;
+        // the card must show them instead of claiming nothing was reported.
+        const archive = {
+            total: {
+                requests: 1,
+                measuredRequests: 1,
+                coveredRequests: 1,
+                promptTokens: 1200,
+                completionTokens: 340,
+                totalTokens: 1540,
+            },
+            byModel: {},
+        };
+
+        const [card] = buildUsageView({ records: [], trackingEnabled: true, archive, prices: ACME_PRICES }).cards;
+
+        expect(metric(card, 'prompt').value).toBe('1,200');
+        expect(metric(card, 'completion').value).toBe('340');
+        expect(metric(card, 'total').value).toBe('1,540');
+    });
+
+    it('weights the hit rate across a card’s rows instead of averaging percentages', () => {
+        const view = buildUsageView({
+            records: [
+                record({ recordId: 'r-1', promptTokens: 10_000, hitTokens: 9_000 }),
+                record({ recordId: 'r-2', promptTokens: 100, hitTokens: 0 }),
+            ],
+            trackingEnabled: true,
+            prices: ACME_PRICES,
+        });
+        const [, story] = view.cards;
+
+        // The per-row rates are 90% and 0%; the card reports the cached share
+        // of the prompt actually billed.
+        expect(metric(story, 'hitRate').value).toBe('89.1%');
+        expect(metric(story, 'hitRate').value).not.toBe('45%');
+    });
+
+    it('says which part of the prompt the hit rate covers', () => {
+        const view = buildUsageView({
+            records: [
+                record({ recordId: 'r-1', promptTokens: 1000, hitTokens: 500 }),
+                record({ recordId: 'r-2', promptTokens: 9000, hitTokens: null }),
+            ],
+            trackingEnabled: true,
+            prices: ACME_PRICES,
+        });
+        const [, story] = view.cards;
+
+        expect(metric(story, 'hitRate')).toMatchObject({ value: '50%', note: '1,000 of 10,000 prompt tokens' });
+        expect(metric(story, 'coverage').value).toBe('100%');
     });
 });

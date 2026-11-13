@@ -12,8 +12,8 @@
         </label>
         <div class="spendbook-panel">
             <div class="spendbook-health" role="status"></div>
-            <div class="spendbook-totals"></div>
             <div class="spendbook-alltime"></div>
+            <div class="spendbook-cards" role="group" aria-label="Usage summary"></div>
             <div class="spendbook-empty"></div>
             <div class="spendbook-table-wrap">
                 <table class="spendbook-table" hidden>
@@ -79,6 +79,26 @@
                 </table>
             </div>
             <button type="button" class="menu_button spendbook-price-add">Add price row</button>
+        </section>
+        <section class="spendbook-help">
+            <h4>How to read these numbers</h4>
+            <ul>
+                <li>Measured: the provider reported the number on the response. This is what you were billed
+                    for, and a cost or cache discount the provider sent is shown as reported.</li>
+                <li>Estimated: the provider reported no usage, so the prompt is counted with SillyTavern's
+                    tokenizer and marked with a tilde. It is a close count, not a bill, and a cache hit is
+                    never estimated.</li>
+                <li>Unavailable: neither the provider nor the tokenizer produced the number. It is shown as
+                    &mdash; and never as 0, so a request that reported nothing cannot look free.</li>
+                <li>The hit rate is token-weighted: cached prompt tokens over the prompt tokens the provider
+                    reported for those same requests, never an average of per-request percentages. A request
+                    without both counts is left out of the ratio rather than counted as a miss.</li>
+                <li>Coverage: the share of prompt tokens the provider actually reported. An estimated prompt
+                    counts as uncovered, so a provider that omits usage lowers coverage instead of
+                    disappearing from it. A completed request that reported no prompt count at all caps
+                    coverage at the share of requests that did report one, because its prompt has a size
+                    nobody measured. Failed and stopped requests are in no denominator.</li>
+            </ul>
         </section>
         <small class="spendbook-privacy-note">
             Spendbook records token counts, cost and latency for chat-completion

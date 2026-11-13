@@ -56,7 +56,7 @@ export function mountSpendbookPanel({
     }
 
     const healthLine = root.querySelector('.spendbook-health');
-    const totalsLine = root.querySelector('.spendbook-totals');
+    const cardsContainer = root.querySelector('.spendbook-cards');
     const allTimeLine = root.querySelector('.spendbook-alltime');
     const emptyLine = root.querySelector('.spendbook-empty');
     const table = root.querySelector('.spendbook-table');
@@ -65,7 +65,7 @@ export function mountSpendbookPanel({
     const resetChatButton = root.querySelector('.spendbook-reset-chat');
     const resetAllTimeButton = root.querySelector('.spendbook-reset-alltime');
     const priceSection = root.querySelector('.spendbook-prices');
-    if (!healthLine || !totalsLine || !allTimeLine || !emptyLine || !table || !rows
+    if (!healthLine || !cardsContainer || !allTimeLine || !emptyLine || !table || !rows
         || !retentionLine || !resetChatButton || !resetAllTimeButton) {
         throw new Error('Spendbook: the settings template has no usage table.');
     }
@@ -79,7 +79,7 @@ export function mountSpendbookPanel({
         const view = buildUsageView({ ...readSnapshot(), prices: editor.prices });
         healthLine.textContent = view.health.label;
         healthLine.dataset.state = view.health.state;
-        totalsLine.textContent = view.totals.label;
+        cardsContainer.replaceChildren(...view.cards.map(renderCard));
         allTimeLine.textContent = view.allTime.label;
         emptyLine.textContent = view.empty ? view.emptyMessage : '';
         emptyLine.hidden = !view.empty;
@@ -129,6 +129,68 @@ export function mountSpendbookPanel({
 function defaultConfirmReset(message) {
     if (typeof globalThis.confirm !== 'function') return false;
     return globalThis.confirm(message) === true;
+}
+
+/**
+ * One summary card: its title and request counts in the header, one cell per
+ * metric, and the note that says why a card has no cost. The source of every
+ * number rides on the cell as a data attribute, so a stylesheet can mute an
+ * estimate without the drawer inventing a second way to say it.
+ *
+ * @param {object} card
+ * @returns {HTMLElement}
+ */
+function renderCard(card) {
+    const section = document.createElement('section');
+    section.className = 'spendbook-card';
+    section.dataset.scope = card.scope;
+
+    const header = document.createElement('header');
+    header.className = 'spendbook-card-header';
+    const title = document.createElement('h4');
+    title.className = 'spendbook-card-title';
+    title.textContent = card.title;
+    const counts = document.createElement('span');
+    counts.className = 'spendbook-card-counts';
+    counts.textContent = card.detailLabel
+        ? `${card.requestsLabel} · ${card.detailLabel}`
+        : card.requestsLabel;
+    header.append(title, counts);
+    section.append(header);
+
+    const metrics = document.createElement('dl');
+    metrics.className = 'spendbook-card-metrics';
+    for (const metric of card.metrics) metrics.append(renderMetric(metric));
+    section.append(metrics);
+
+    if (card.note) {
+        const note = document.createElement('small');
+        note.className = 'spendbook-card-note';
+        note.textContent = card.note;
+        section.append(note);
+    }
+    return section;
+}
+
+function renderMetric(metric) {
+    const cell = document.createElement('div');
+    cell.className = `spendbook-metric spendbook-metric-${metric.key}`;
+    cell.dataset.source = metric.source;
+
+    const label = document.createElement('dt');
+    label.textContent = metric.label;
+    const value = document.createElement('dd');
+    value.className = 'spendbook-metric-value';
+    value.textContent = metric.value;
+    cell.append(label, value);
+
+    if (metric.note) {
+        const note = document.createElement('small');
+        note.className = 'spendbook-metric-note';
+        note.textContent = metric.note;
+        cell.append(note);
+    }
+    return cell;
 }
 
 function renderRow(row) {
