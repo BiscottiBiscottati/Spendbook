@@ -271,6 +271,15 @@ describe('Spendbook ledger — all-time aggregate', () => {
         expect(storage.read(USAGE_ALL_TIME_STORAGE_KEY).updatedAt).toBe(5000);
     });
 
+    it('persists the all-time total with the record, before the debounce', () => {
+        const harness = createHarness();
+
+        harness.ledger.add(record());
+
+        expect(harness.storage.read(USAGE_ALL_TIME_STORAGE_KEY).totals).toMatchObject({ requests: 1 });
+        expect(harness.saveMetadata).not.toHaveBeenCalled();
+    });
+
     it('flushes a pending all-time write when the chat changes', () => {
         const harness = createHarness();
         harness.ledger.add(record());
@@ -453,6 +462,22 @@ describe('Spendbook ledger — delete and rename', () => {
         expect(harness.state.metadata[USAGE_CHAT_METADATA_KEY]).toBeUndefined();
     });
 
+    it('deleting a chat still clears its bucket when the metadata save fails', async () => {
+        const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const saveMetadata = vi.fn(() => Promise.reject(new Error('save failed')));
+        const harness = createHarness({ saveMetadata });
+        harness.ledger.add(record());
+        harness.ledger.flush();
+
+        harness.ledger.handleChatDeleted('chat-a');
+        await Promise.resolve();
+
+        expect(harness.ledger.recordsFor('chat-a')).toEqual([]);
+        expect(harness.ledger.allTimeForView().totals.requests).toBe(0);
+        expect(consoleError).toHaveBeenCalled();
+        consoleError.mockRestore();
+    });
+
     it('treats a repeated delete as a no-op and never subtracts below zero', () => {
         const harness = createHarness();
         harness.ledger.add(record());
@@ -534,6 +559,55 @@ describe('Spendbook ledger — delete and rename', () => {
         expect(harness.ledger.allTimeForView().chats).toBe(2);
     });
 
+    it('keeps the rows of a renamed chat that was never opened in this session', async () => {
+        const harness = createHarness({ chatId: 'chat-b' });
+        await harness.ledger.handleChatRenamed('chat-a', 'chat-renamed');
+
+        // The renamed file is the only copy of the rows, and it still names the
+        // old id, so the alias is what proves they belong to this chat.
+        expect(harness.storage.read(USAGE_PENDING_STORAGE_KEY).renames).toEqual({ 'chat-a': 'chat-renamed' });
+        harness.state.chatId = 'chat-renamed';
+        harness.state.metadata = {
+            [USAGE_CHAT_METADATA_KEY]: { ownerChatId: 'chat-a', revision: 3, records: [record()] },
+        };
+        const reloaded = harness.createLedger();
+        reloaded.loadChat('chat-renamed');
+
+        expect(reloaded.recordsFor('chat-renamed')).toHaveLength(1);
+        expect(harness.state.metadata[USAGE_CHAT_METADATA_KEY].ownerChatId).toBe('chat-renamed');
+
+        // Once the file itself names the chat, the alias is dropped.
+        const third = harness.createLedger();
+        third.loadChat('chat-renamed');
+        expect(harness.storage.read(USAGE_PENDING_STORAGE_KEY).renames).toEqual({});
+        expect(third.recordsFor('chat-renamed')).toHaveLength(1);
+    });
+
+    it('follows a rename chain when the file still names the first id', async () => {
+        const harness = createHarness({ chatId: 'chat-b' });
+        await harness.ledger.handleChatRenamed('chat-a', 'chat-b-renamed');
+        await harness.ledger.handleChatRenamed('chat-b-renamed', 'chat-c-renamed');
+
+        harness.state.chatId = 'chat-c-renamed';
+        harness.state.metadata = {
+            [USAGE_CHAT_METADATA_KEY]: { ownerChatId: 'chat-a', revision: 1, records: [record()] },
+        };
+        const reloaded = harness.createLedger();
+        reloaded.loadChat('chat-c-renamed');
+
+        expect(reloaded.recordsFor('chat-c-renamed')).toHaveLength(1);
+    });
+
+    it('merges both sides’ folded counters when a rename collides with a live chat', async () => {
+        const harness = createHarness({ chatId: 'chat-b', storage: null });
+        for (const entry of buildRecords(501)) harness.ledger.add(entry);
+        for (const entry of buildRecords(501, { chatId: 'chat-b' })) harness.ledger.add(entry);
+
+        await harness.ledger.handleChatRenamed('chat-a', 'chat-b');
+
+        expect(harness.ledger.archivedFor('chat-b').total.requests).toBe(2);
+    });
+
     it('lets a renamed chat that was not open adopt its moved rows on the next open', async () => {
         const harness = createHarness({ chatId: 'chat-b' });
         harness.ledger.add(record());
@@ -553,6 +627,34 @@ describe('Spendbook ledger — delete and rename', () => {
 
         expect(reloaded.recordsFor('chat-renamed')).toHaveLength(1);
         expect(harness.state.metadata[USAGE_CHAT_METADATA_KEY].ownerChatId).toBe('chat-renamed');
+    });
+
+    it('renaming the open chat still moves its rows when the metadata save fails', async () => {
+        const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const saveMetadata = vi.fn(() => Promise.reject(new Error('save failed')));
+        const harness = createHarness({
+            chatId: 'chat-a',
+            saveMetadata,
+            sanitizeChatFileName: async () => 'chat-renamed',
+        });
+        harness.ledger.add(record());
+        harness.state.chatId = 'chat-renamed';
+        harness.state.metadata = {};
+        harness.ledger.handleChatChanged('chat-renamed');
+
+        await harness.ledger.handleChatRenamed('chat-a', 'chat-renamed', {
+            previousChatId: 'chat-a',
+            currentChatId: 'chat-renamed',
+        });
+        await Promise.resolve();
+
+        expect(harness.ledger.recordsFor('chat-renamed')).toHaveLength(1);
+        expect(harness.ledger.allTimeForView()).toEqual({
+            totals: expect.objectContaining({ requests: 1 }),
+            chats: 1,
+        });
+        expect(consoleError).toHaveBeenCalled();
+        consoleError.mockRestore();
     });
 
     it('treats a repeated rename as a no-op for the all-time totals', async () => {

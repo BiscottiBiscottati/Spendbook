@@ -23,11 +23,16 @@ const ACCUMULATOR_FIELDS = Object.freeze([
     'estimatedPromptTokens',
     'hitTokens',
     'ratedPromptTokens',
+    'completionTokens',
+    'reasoningTokens',
+    'totalTokens',
 ]);
+
+import { USAGE_ORIGINS } from './origin.js';
 
 const COMPLETED_STATUSES = new Set(['ok', 'no-usage']);
 
-const KNOWN_ORIGINS = new Set(['story', 'quiet', 'internal']);
+const KNOWN_ORIGINS = new Set(Object.values(USAGE_ORIGINS));
 
 /**
  * Zeroed counters for the rows folded into one bucket.
@@ -70,13 +75,13 @@ export function addRecordToUsageAccumulator(accumulator, record) {
     accumulator.requests += 1;
     if (isMeasured(record)) {
         accumulator.measuredRequests += 1;
-        if (isCount(record.promptTokens)) {
+        if (isTokenCount(record.promptTokens)) {
             accumulator.promptTokens += record.promptTokens;
             accumulator.coveredRequests += 1;
         }
     } else if (isEstimated(record)) {
         accumulator.estimatedRequests += 1;
-        if (isCount(record.estimatedPromptTokens)) {
+        if (isTokenCount(record.estimatedPromptTokens)) {
             accumulator.estimatedPromptTokens += record.estimatedPromptTokens;
             accumulator.estimatedPromptRequests += 1;
         }
@@ -86,11 +91,15 @@ export function addRecordToUsageAccumulator(accumulator, record) {
 
     // The hit-rate pair is only comparable when the provider reported both
     // counts, so a request without them never dilutes the rate.
-    if (isCount(record.promptTokens) && isCount(record.hitTokens)) {
+    if (isTokenCount(record.promptTokens) && isTokenCount(record.hitTokens)) {
         accumulator.ratedRequests += 1;
         accumulator.ratedPromptTokens += record.promptTokens;
         accumulator.hitTokens += record.hitTokens;
     }
+    // Output counts are summed as reported; a row without one adds nothing.
+    if (isTokenCount(record.completionTokens)) accumulator.completionTokens += record.completionTokens;
+    if (isTokenCount(record.reasoningTokens)) accumulator.reasoningTokens += record.reasoningTokens;
+    if (isTokenCount(record.totalTokens)) accumulator.totalTokens += record.totalTokens;
     return accumulator;
 }
 
@@ -264,9 +273,9 @@ function isMeasured(record) {
 }
 
 function isEstimated(record) {
-    return record?.usageSource === 'estimated' || isCount(record?.estimatedPromptTokens);
+    return record?.usageSource === 'estimated' || isTokenCount(record?.estimatedPromptTokens);
 }
 
-function isCount(value) {
+function isTokenCount(value) {
     return Number.isFinite(value) && value >= 0;
 }

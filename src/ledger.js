@@ -25,7 +25,6 @@ import {
     createUsageAccumulator,
     createUsageArchive,
     isUsageAccumulatorEmpty,
-    isUsageArchiveEmpty,
     mergeUsageAccumulators,
     mergeUsageArchives,
     normalizeUsageAccumulator,
@@ -46,7 +45,7 @@ export class UsageLedger {
     /** @type {Map<string|null, object>} */
     #byChat = new Map();
     #allTime = createAllTime();
-    #pendingBackup = { chats: {} };
+    #pendingBackup = createPendingBackup();
     #pendingChatIds = new Set();
     #pendingTimer = null;
 
@@ -111,6 +110,10 @@ export class UsageLedger {
         state.revision += 1;
         this.#evictOverflow(state);
         this.#addToAllTime(record);
+        // The all-time total is written with the record rather than after the
+        // save debounce: a tab killed before the flush would otherwise replay
+        // the row from the pending copy without ever counting it.
+        this.#persistAllTime();
 
         if (this.#isActiveChat(chatId) && this.#getMetadata()) {
             state.ownerChatId = chatId;
@@ -172,8 +175,11 @@ export class UsageLedger {
      * so a switch inside the debounce does not lose the records; a pending copy
      * the namespace has caught up with is dropped.
      *
-     * A namespace whose owner is a different chat is a copy — a branch or a
-     * manual file copy — so it is removed and the chat starts clean.
+     * A namespace whose owner is a different chat is normally a copy — a branch
+     * or a manual file copy — so it is removed and the chat starts clean. The
+     * exception is a chat renamed while it was not open this session: its file
+     * still names the old id, and the recorded old→new alias proves the rows
+     * belong here rather than to a copy.
      *
      * @param {string|null} chatId
      */
@@ -182,22 +188,30 @@ export class UsageLedger {
         const metadata = this.#isActiveChat(chatId) ? this.#getMetadata() : null;
         const raw = metadata ? metadata[USAGE_CHAT_METADATA_KEY] : null;
         const persisted = normalizeNamespace(raw);
-        const pendingKey = bucketKeyFor(chatId);
+        const pendingKey = chatKey(chatId);
         const pending = pendingKey ? normalizeNamespace(this.#pendingBackup.chats[pendingKey]) : null;
         const persistedOwned = !!persisted && persisted.ownerChatId === chatId;
         const pendingAuthoritative = !!pending && (!persistedOwned || pending.revision > persisted.revision);
+        const renamedFrom = !!persisted && !persistedOwned
+            && renamedAncestorIds(chatId, this.#pendingBackup.renames).has(persisted.ownerChatId);
         // Reading the namespace back at an equal-or-newer revision is the only
         // reliable proof that the chat file actually saved it.
         if (persistedOwned && pending && persisted.revision >= pending.revision) {
             delete this.#pendingBackup.chats[pendingKey];
             this.#persistPendingBackup();
         }
+        if (persistedOwned) this.#forgetRenames(chatId);
 
         const existing = this.#byChat.get(key);
-        let adoptedPending = false;
+        let adoptedOutside = false;
         if (pendingAuthoritative && pending.revision >= (existing?.revision ?? 0)) {
             this.#byChat.set(key, { ...stateFromNamespace(pending), ownerChatId: chatId });
-            adoptedPending = true;
+            adoptedOutside = true;
+        } else if (renamedFrom) {
+            const adopted = { ...stateFromNamespace(persisted), ownerChatId: chatId };
+            if (existing) this.#mergeMovedState(existing, adopted);
+            else this.#byChat.set(key, adopted);
+            adoptedOutside = true;
         } else if (persistedOwned && (!existing || persisted.revision > existing.revision)) {
             this.#byChat.set(key, { ...stateFromNamespace(persisted), ownerChatId: chatId });
         } else if (persistedOwned && existing.revision > persisted.revision
@@ -213,9 +227,9 @@ export class UsageLedger {
             if (!existing) this.#byChat.set(key, createChatState(chatId));
         }
 
-        if (adoptedPending && this.#isActiveChat(chatId) && metadata) {
-            // The file is behind the replayed copy, so write it back now and
-            // let the debounced save finish the job.
+        if (adoptedOutside && this.#isActiveChat(chatId) && metadata) {
+            // The file is behind the state just adopted, so write it back now
+            // and let the debounced save finish the job.
             this.#writeNamespace(this.#byChat.get(key));
             this.#scheduleSave(chatId);
         }
@@ -294,6 +308,7 @@ export class UsageLedger {
         const oldKey = chatKey(oldId);
         const newKey = chatKey(newId);
         const previous = this.#byChat.get(oldKey);
+        const hadState = !!previous;
         if (previous) {
             previous.ownerChatId = newId;
             this.#byChat.delete(oldKey);
@@ -302,19 +317,26 @@ export class UsageLedger {
             else this.#byChat.set(newKey, previous);
         }
 
-        const pendingCopy = this.#pendingBackup.chats[oldId];
+        const pendingCopy = this.#pendingBackup.chats[oldKey];
         let movedPending = null;
         if (pendingCopy) {
-            movedPending = this.#mergePendingSnapshots(pendingCopy, this.#pendingBackup.chats[newId]);
-            this.#pendingBackup.chats[newId] = movedPending;
-            delete this.#pendingBackup.chats[oldId];
+            movedPending = this.#mergePendingSnapshots(pendingCopy, this.#pendingBackup.chats[newKey]);
+            this.#pendingBackup.chats[newKey] = movedPending;
+            delete this.#pendingBackup.chats[oldKey];
             this.#persistPendingBackup();
         }
 
-        const bucket = this.#allTime.chats[oldId];
+        if (!hadState && !pendingCopy) {
+            // The rows live only in the renamed file, and that file still names
+            // the old id. Remember the old→new pair so its next open adopts the
+            // rows instead of discarding them as a branch copy.
+            this.#rememberRename(oldId, newId);
+        }
+
+        const bucket = this.#allTime.chats[oldKey];
         if (bucket) {
-            this.#allTime.chats[newId] = mergeUsageAccumulators(this.#allTime.chats[newId] ?? null, bucket);
-            delete this.#allTime.chats[oldId];
+            this.#allTime.chats[newKey] = mergeUsageAccumulators(this.#allTime.chats[newKey] ?? null, bucket);
+            delete this.#allTime.chats[oldKey];
             this.#persistAllTime();
         }
 
@@ -354,7 +376,7 @@ export class UsageLedger {
         const persisted = metadata && this.#isActiveChat(chatId)
             ? normalizeNamespace(metadata[USAGE_CHAT_METADATA_KEY])
             : null;
-        const pending = normalizeNamespace(this.#pendingBackup.chats[bucketKeyFor(chatId)]);
+        const pending = normalizeNamespace(this.#pendingBackup.chats[chatKey(chatId)]);
         // A reset followed by another reset must not drop below the tombstone
         // revision it already staged: a second save failure would otherwise let
         // the stale rows back in on the next open.
@@ -402,8 +424,9 @@ export class UsageLedger {
         this.#pendingChatIds.delete(key);
         this.#byChat.delete(key);
         this.#deletePendingBackup(chatId);
+        this.#forgetRenames(chatId);
 
-        const bucketKey = bucketKeyFor(chatId);
+        const bucketKey = chatKey(chatId);
         if (!bucketKey || !this.#allTime.chats[bucketKey]) return;
         this.#allTime.totals = subtractUsageAccumulators(this.#allTime.totals, this.#allTime.chats[bucketKey]);
         delete this.#allTime.chats[bucketKey];
@@ -421,7 +444,7 @@ export class UsageLedger {
         if (!this.#storage || typeof this.#saveMetadata !== 'function') return;
         // Nothing persisted means nothing can be resurrected.
         if (!(previousRevision > 0)) return;
-        const key = bucketKeyFor(chatId);
+        const key = chatKey(chatId);
         if (!key) return;
         const state = createChatState(chatId);
         state.revision = previousRevision + 1;
@@ -437,7 +460,7 @@ export class UsageLedger {
 
     #addToAllTime(record) {
         addRecordToUsageAccumulator(this.#allTime.totals, record);
-        const bucketKey = bucketKeyFor(record.chatId ?? null);
+        const bucketKey = chatKey(record.chatId ?? null);
         if (!bucketKey) return;
         if (!this.#allTime.chats[bucketKey]) this.#allTime.chats[bucketKey] = createUsageAccumulator();
         addRecordToUsageAccumulator(this.#allTime.chats[bucketKey], record);
@@ -507,14 +530,7 @@ export class UsageLedger {
         const base = (right.revision ?? 0) > (left.revision ?? 0) ? right : left;
         const other = base === left ? right : left;
         const state = stateFromNamespace(base);
-        const knownIds = new Set(state.records.map(recordKey).filter(Boolean));
-        for (const entry of other.records ?? []) {
-            const key = recordKey(entry);
-            if (key && knownIds.has(key)) continue;
-            if (key) knownIds.add(key);
-            state.records.push(entry);
-        }
-        this.#evictOverflow(state);
+        this.#mergeRecordsInto(state, other.records);
         state.archived = mergeUsageArchives(state.archived, other.archived);
         state.revision = Math.max(left.revision ?? 0, right.revision ?? 0);
         return serializeState(state);
@@ -522,12 +538,28 @@ export class UsageLedger {
 
     #mergeMovedState(target, source) {
         this.#mergeRecordsInto(target, source.records);
-        // A state that already adopted the same archive would double count it.
-        if (isUsageArchiveEmpty(target.archived) && !isUsageArchiveEmpty(source.archived)) {
-            target.archived = mergeUsageArchives(target.archived, source.archived);
-        }
+        target.archived = mergeUsageArchives(target.archived, source.archived);
         target.ownerChatId = source.ownerChatId;
         target.revision = Math.max(target.revision, source.revision);
+    }
+
+    #rememberRename(oldId, newId) {
+        if (!this.#storage) return;
+        this.#pendingBackup.renames[oldId] = newId;
+        this.#persistPendingBackup();
+    }
+
+    /**
+     * Drops the rename aliases that led to one chat: once the chat's own file
+     * names it, or once the chat is gone, the alias has nothing left to prove.
+     *
+     * @param {string|null} chatId
+     */
+    #forgetRenames(chatId) {
+        const stale = renamedAncestorIds(chatId, this.#pendingBackup.renames);
+        if (stale.size === 0) return;
+        for (const ancestor of stale) delete this.#pendingBackup.renames[ancestor];
+        this.#persistPendingBackup();
     }
 
     #mergeRecordsInto(state, records) {
@@ -546,14 +578,14 @@ export class UsageLedger {
 
     #stagePendingBackup(chatId, state) {
         if (!this.#storage || typeof this.#saveMetadata !== 'function') return;
-        const key = bucketKeyFor(chatId);
+        const key = chatKey(chatId);
         if (!key) return;
         this.#pendingBackup.chats[key] = serializeState({ ...state, ownerChatId: chatId });
         this.#persistPendingBackup();
     }
 
     #deletePendingBackup(chatId) {
-        const key = bucketKeyFor(chatId);
+        const key = chatKey(chatId);
         if (!key || !this.#pendingBackup.chats[key]) return;
         delete this.#pendingBackup.chats[key];
         this.#persistPendingBackup();
@@ -582,6 +614,7 @@ export class UsageLedger {
             this.#storage.setItem(USAGE_PENDING_STORAGE_KEY, JSON.stringify({
                 version: PENDING_VERSION,
                 chats: this.#pendingBackup.chats,
+                renames: this.#pendingBackup.renames,
             }));
         } catch {
             /* a full or disabled storage must not break capture */
@@ -661,13 +694,17 @@ function readAllTime(storage) {
     }
 }
 
+function createPendingBackup() {
+    return { chats: {}, renames: {} };
+}
+
 function readPendingBackup(storage) {
-    const empty = { chats: {} };
+    const empty = createPendingBackup();
     if (!storage) return empty;
     try {
         const parsed = JSON.parse(storage.getItem(USAGE_PENDING_STORAGE_KEY) ?? 'null');
         if (!parsed || typeof parsed !== 'object' || parsed.version !== PENDING_VERSION) return empty;
-        const backup = { chats: {} };
+        const backup = createPendingBackup();
         for (const [chatId, entry] of Object.entries(parsed.chats ?? {})) {
             const namespace = normalizeNamespace(entry);
             if (!namespace) continue;
@@ -676,18 +713,52 @@ function readPendingBackup(storage) {
             if (namespace.records.length === 0 && namespace.revision === 0) continue;
             backup.chats[chatId] = { ...namespace, ownerChatId: namespace.ownerChatId ?? chatId };
         }
+        for (const [oldId, newId] of Object.entries(parsed.renames ?? {})) {
+            if (typeof oldId !== 'string' || !oldId) continue;
+            if (typeof newId !== 'string' || !newId || newId === oldId) continue;
+            backup.renames[oldId] = newId;
+        }
         return backup;
     } catch {
         return empty;
     }
 }
 
-function bucketKeyFor(chatId) {
-    return typeof chatId === 'string' && chatId ? chatId : null;
+/**
+ * Every recorded id whose rename chain ends at one chat. A chain covers a chat
+ * renamed twice before it was opened, whose file then still names the first id.
+ *
+ * @param {string|null} chatId
+ * @param {Record<string, string>} renames
+ * @returns {Set<string>}
+ */
+function renamedAncestorIds(chatId, renames) {
+    const ancestors = new Set();
+    if (!chatId) return ancestors;
+    for (const [oldId, newId] of Object.entries(renames ?? {})) {
+        let current = newId;
+        const visited = new Set();
+        while (current && !visited.has(current)) {
+            if (current === chatId) {
+                ancestors.add(oldId);
+                break;
+            }
+            visited.add(current);
+            current = renames[current] ?? null;
+        }
+    }
+    return ancestors;
 }
 
+/**
+ * The one derivation of a chat's storage key: an id that can key the memory
+ * map, the all-time bucket and the pending copy alike.
+ *
+ * @param {unknown} chatId
+ * @returns {string|null}
+ */
 function chatKey(chatId) {
-    return chatId ?? null;
+    return typeof chatId === 'string' && chatId ? chatId : null;
 }
 
 function recordKey(record) {

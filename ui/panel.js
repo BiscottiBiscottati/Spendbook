@@ -24,7 +24,7 @@ const RESET_ALL_TIME_MESSAGE = 'Clear Spendbook’s all-time totals? '
  * @param {string} options.html Rendered drawer markup
  * @param {import('../src/settings.js').SpendbookSettings} options.settings Settings with defaults already merged
  * @param {(trackingEnabled: boolean) => void} options.onTrackingChange Called when the user flips the tracking toggle
- * @param {() => object} [options.getSnapshot] Reads the current ledger and observer state; called on mount, on refresh and after a toggle change
+ * @param {() => ({records: object[], trackingEnabled: boolean, health: object|null, retention: object|null, allTime: object|null})} [options.getSnapshot] Reads the current ledger and observer state; called on mount, on refresh and after a toggle change
  * @param {() => void} [options.onResetChat] Clears the open chat after the user confirmed it
  * @param {() => void} [options.onResetAllTime] Clears the all-time totals after the user confirmed it
  * @param {(message: string) => boolean} [options.confirmReset] Asks the user; declining leaves the ledger untouched

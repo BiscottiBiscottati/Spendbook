@@ -6,10 +6,12 @@
  * without a DOM and a format change cannot reach into the ledger.
  */
 
+import { USAGE_ORIGINS } from '../src/origin.js';
+
 const PLACEHOLDER = '—';
 const NUMBER_FORMAT = new Intl.NumberFormat('en-US');
 
-const KNOWN_ORIGINS = new Set(['story', 'quiet', 'internal']);
+const KNOWN_ORIGINS = new Set(Object.values(USAGE_ORIGINS));
 
 const STATUS_LABELS = Object.freeze({
     ok: 'ok',
@@ -24,7 +26,6 @@ const SOURCE_LABELS = Object.freeze({
     unavailable: 'unavailable',
 });
 
-const RETENTION_LIMIT = 500;
 
 /**
  * Turns ledger records and observer state into the labels the drawer renders.
@@ -35,7 +36,15 @@ const RETENTION_LIMIT = 500;
  * @param {object|null} [options.health] Observer health counters, when installed.
  * @param {{limit: number, retained: number, total: number}|null} [options.retention] Row counts for the active chat.
  * @param {{totals: object, chats: number}|null} [options.allTime] Cross-chat aggregate.
- * @returns {object}
+ * @returns {{
+ *   trackingEnabled: boolean,
+ *   health: {state: string, label: string},
+ *   retention: {limit: number, retained: number, total: number, folded: number, label: string},
+ *   allTime: {requests: number, excluded: number, chats: number, label: string},
+ *   empty: boolean,
+ *   emptyMessage: string,
+ *   rows: object[],
+ * }}
  */
 export function buildUsageView({
     records = [],
@@ -67,35 +76,30 @@ export function buildUsageView({
  * @returns {{limit: number, retained: number, total: number, folded: number, label: string}}
  */
 export function describeRetention(retention = {}) {
-    const limit = toCount(retention?.limit) || RETENTION_LIMIT;
+    const limit = toCount(retention?.limit);
     const retained = toCount(retention?.retained);
     const total = Math.max(retained, toCount(retention?.total));
     const folded = total - retained;
+    const summary = { limit, retained, total, folded };
 
     if (total === 0) {
         return {
-            limit,
-            retained,
-            total,
-            folded,
-            label: `Retention: the newest ${formatCount(limit)} requests are kept per chat.`,
+            ...summary,
+            label: limit > 0
+                ? `Retention: the newest ${formatCount(limit)} requests are kept per chat.`
+                : 'Retention: older rows are folded into the totals when a chat reaches its cap.',
         };
     }
     if (folded > 0) {
         return {
-            limit,
-            retained,
-            total,
-            folded,
+            ...summary,
             label: `Retention: showing the newest ${formatCount(retained)} of ${formatCount(total)} requests — ${formatCount(folded)} older rows are folded into the totals.`,
         };
     }
+    const cap = limit > 0 ? ` of up to ${formatCount(limit)}` : '';
     return {
-        limit,
-        retained,
-        total,
-        folded,
-        label: `Retention: ${formatCount(retained)} of up to ${formatCount(limit)} requests kept — nothing is folded into the totals yet.`,
+        ...summary,
+        label: `Retention: ${formatCount(retained)}${cap} requests kept — nothing is folded into the totals yet.`,
     };
 }
 
@@ -104,23 +108,40 @@ export function describeRetention(retention = {}) {
  * bucket local storage still holds.
  *
  * @param {{totals?: object, chats?: number}|null} [allTime]
- * @returns {{requests: number, excluded: number, chats: number, label: string}}
+ * @returns {{requests: number, excluded: number, chats: number, promptTokens: number, estimatedPromptTokens: number, label: string}}
  */
 export function describeAllTime(allTime = {}) {
     const requests = toCount(allTime?.totals?.requests);
     const excluded = toCount(allTime?.totals?.excludedRequests);
+    const promptTokens = toCount(allTime?.totals?.promptTokens);
+    const estimatedPromptTokens = toCount(allTime?.totals?.estimatedPromptTokens);
     const chats = toCount(allTime?.chats);
 
     if (requests + excluded === 0 || chats === 0) {
-        return { requests: 0, excluded: 0, chats: 0, label: 'All time: no requests recorded yet.' };
+        return {
+            requests: 0,
+            excluded: 0,
+            chats: 0,
+            promptTokens: 0,
+            estimatedPromptTokens: 0,
+            label: 'All time: no requests recorded yet.',
+        };
     }
 
     const stopped = excluded > 0 ? ` and ${formatCount(excluded)} failed or stopped` : '';
+    // Measured and estimated prompt tokens never share one number: the drawer
+    // must not make an estimate look like a provider count.
+    const measured = promptTokens > 0 ? ` · ${formatCount(promptTokens)} prompt tokens` : '';
+    const estimated = estimatedPromptTokens > 0
+        ? ` · ${formatCount(estimatedPromptTokens)} estimated prompt tokens`
+        : '';
     return {
         requests,
         excluded,
         chats,
-        label: `All time: ${formatCount(requests)} completed request${requests === 1 ? '' : 's'}${stopped}, across ${formatCount(chats)} chat${chats === 1 ? '' : 's'}.`,
+        promptTokens,
+        estimatedPromptTokens,
+        label: `All time: ${formatCountLabel(requests, 'completed request')}${stopped}, across ${formatCountLabel(chats, 'chat')}${measured}${estimated}.`,
     };
 }
 

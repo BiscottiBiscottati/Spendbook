@@ -284,19 +284,27 @@ describe('Spendbook drawer — retention and all-time', () => {
         );
     });
 
-    it('shows the all-time summary across chats', () => {
+    it('shows the all-time summary across chats, measured tokens apart from estimates', () => {
         const { container } = mount({
             settings: { trackingEnabled: true },
             getSnapshot: () => ({
                 records: [row()],
                 trackingEnabled: true,
                 health: { captured: 1 },
-                allTime: { totals: { requests: 1204, excludedRequests: 12 }, chats: 3 },
+                allTime: {
+                    totals: {
+                        requests: 1204,
+                        excludedRequests: 12,
+                        promptTokens: 240000,
+                        estimatedPromptTokens: 240,
+                    },
+                    chats: 3,
+                },
             }),
         });
 
         expect(container.querySelector('.spendbook-alltime').textContent).toBe(
-            'All time: 1,204 completed requests and 12 failed or stopped, across 3 chats.',
+            'All time: 1,204 completed requests and 12 failed or stopped, across 3 chats · 240,000 prompt tokens · 240 estimated prompt tokens.',
         );
     });
 

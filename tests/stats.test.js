@@ -14,6 +14,26 @@ import {
     subtractUsageAccumulators,
 } from '../src/stats.js';
 
+// The shape a zeroed accumulator must have, written out here so a bug in the
+// accumulator cannot agree with itself.
+const ZERO_COUNTERS = {
+    requests: 0,
+    measuredRequests: 0,
+    estimatedRequests: 0,
+    unavailableRequests: 0,
+    excludedRequests: 0,
+    ratedRequests: 0,
+    coveredRequests: 0,
+    estimatedPromptRequests: 0,
+    promptTokens: 0,
+    estimatedPromptTokens: 0,
+    hitTokens: 0,
+    ratedPromptTokens: 0,
+    completionTokens: 0,
+    reasoningTokens: 0,
+    totalTokens: 0,
+};
+
 function record(overrides = {}) {
     return {
         recordId: 'r-1',
@@ -23,6 +43,8 @@ function record(overrides = {}) {
         configuration: null,
         promptTokens: 1200,
         hitTokens: 300,
+        completionTokens: 340,
+        totalTokens: 1540,
         estimatedPromptTokens: null,
         ...overrides,
     };
@@ -51,6 +73,9 @@ describe('Spendbook usage accumulator', () => {
             estimatedPromptTokens: 0,
             hitTokens: 300,
             ratedPromptTokens: 1200,
+            completionTokens: 340,
+            reasoningTokens: 0,
+            totalTokens: 1540,
         });
     });
 
@@ -109,7 +134,7 @@ describe('Spendbook usage accumulator', () => {
             excludedRequests: 0,
             hitTokens: 0,
         });
-        expect(normalizeUsageAccumulator(null)).toEqual(createUsageAccumulator());
+        expect(normalizeUsageAccumulator(null)).toEqual(ZERO_COUNTERS);
     });
 
     it('sums accumulators and clamps a subtraction at zero', () => {
@@ -167,9 +192,9 @@ describe('Spendbook evicted-row archive', () => {
     });
 
     it('normalizes a missing or malformed archive', () => {
-        expect(normalizeUsageArchive(null)).toEqual(createUsageArchive());
+        expect(normalizeUsageArchive(null)).toEqual({ total: ZERO_COUNTERS, byOrigin: {}, byConfiguration: {} });
         expect(normalizeUsageArchive({ total: { requests: 2 }, byOrigin: 'nope' })).toEqual({
-            total: { ...createUsageAccumulator(), requests: 2 },
+            total: { ...ZERO_COUNTERS, requests: 2 },
             byOrigin: {},
             byConfiguration: {},
         });
