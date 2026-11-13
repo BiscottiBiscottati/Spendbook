@@ -1,0 +1,115 @@
+/**
+ * Spendbook view model.
+ *
+ * Pure: records, tracking state and observer health in; labels and numbers out.
+ * The panel renders this and nothing else, so the drawer's text is testable
+ * without a DOM and a format change cannot reach into the ledger.
+ */
+
+const PLACEHOLDER = '—';
+const NUMBER_FORMAT = new Intl.NumberFormat('en-US');
+
+const ORIGIN_LABELS = Object.freeze({
+    story: 'story',
+    quiet: 'quiet',
+    internal: 'internal',
+});
+
+const STATUS_LABELS = Object.freeze({
+    ok: 'ok',
+    'no-usage': 'no usage',
+    error: 'error',
+    aborted: 'aborted',
+});
+
+/**
+ * Turns ledger records and observer state into the labels the drawer renders.
+ *
+ * @param {object} [options]
+ * @param {object[]} [options.records] Newest-first records for the active chat.
+ * @param {boolean} [options.trackingEnabled] Whether the observer is capturing.
+ * @param {object|null} [options.health] Observer health counters, when installed.
+ * @returns {{empty: boolean, emptyMessage: string, trackingEnabled: boolean, health: {state: string, label: string}, rows: object[]}}
+ */
+export function buildUsageView({ records = [], trackingEnabled = false, health = null } = {}) {
+    const rows = (Array.isArray(records) ? records : []).map(buildRow);
+
+    return {
+        trackingEnabled,
+        health: describeObserverHealth({ trackingEnabled, health }),
+        empty: rows.length === 0,
+        emptyMessage: trackingEnabled
+            ? 'No requests recorded yet. Send a message with tracking on to start the table.'
+            : 'Tracking is off. Turn on tracking to record requests in this chat.',
+        rows,
+    };
+}
+
+/**
+ * Separates "tracking is off", "observer installed but nothing captured yet"
+ * and "the observer is failing", so an empty table is never ambiguous.
+ *
+ * @param {{trackingEnabled: boolean, health: object|null}} options
+ * @returns {{state: string, label: string}}
+ */
+export function describeObserverHealth({ trackingEnabled = false, health = null } = {}) {
+    if (!trackingEnabled) {
+        return { state: 'off', label: 'Tracking is off — the observer is not installed.' };
+    }
+    if (!health) {
+        return { state: 'not-installed', label: 'Tracking is on, but the observer is not installed yet.' };
+    }
+
+    const errorCount = Number(health.errors) || 0;
+    if (errorCount > 0) {
+        return {
+            state: 'error',
+            label: `Observer error — ${formatCountLabel(errorCount, 'capture attempt')} failed. Rows may be missing.`,
+        };
+    }
+
+    const captured = Number(health.captured) || 0;
+    if (captured === 0) {
+        return { state: 'idle', label: 'Observer installed — no requests captured yet.' };
+    }
+    return {
+        state: 'ok',
+        label: `Observer installed — ${formatCountLabel(captured, 'request')} captured.`,
+    };
+}
+
+function buildRow(record) {
+    return {
+        recordId: record.recordId ?? '',
+        timeLabel: formatTime(record.timestamp),
+        originLabel: ORIGIN_LABELS[record.origin] ?? PLACEHOLDER,
+        labelLabel: record.label || PLACEHOLDER,
+        providerLabel: record.provider || 'unknown',
+        modelLabel: record.model || 'unknown',
+        promptLabel: formatCount(record.promptTokens),
+        completionLabel: formatCount(record.completionTokens),
+        latencyLabel: formatLatency(record.latencyMs),
+        statusLabel: STATUS_LABELS[record.status] ?? PLACEHOLDER,
+    };
+}
+
+function formatTime(timestamp) {
+    if (!Number.isFinite(timestamp)) return PLACEHOLDER;
+    const date = new Date(timestamp);
+    const pad = (part) => String(part).padStart(2, '0');
+    return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function formatLatency(latencyMs) {
+    if (!Number.isFinite(latencyMs) || latencyMs < 0) return PLACEHOLDER;
+    if (latencyMs < 1000) return `${Math.round(latencyMs)} ms`;
+    return `${(latencyMs / 1000).toFixed(1)} s`;
+}
+
+function formatCount(value) {
+    return Number.isFinite(value) ? NUMBER_FORMAT.format(value) : PLACEHOLDER;
+}
+
+function formatCountLabel(count, noun) {
+    return `${NUMBER_FORMAT.format(count)} ${noun}${count === 1 ? '' : 's'}`;
+}

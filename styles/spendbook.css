@@ -5,6 +5,46 @@
  * a second stylesheet. No colour literals, no extension-specific ids.
  */
 
+.spendbook-panel {
+    margin-top: 8px;
+}
+
+.spendbook-health {
+    margin-bottom: 6px;
+    color: var(--SmartThemeEmColor);
+    font-size: 0.9em;
+}
+
+.spendbook-empty {
+    padding: 8px 0;
+    color: var(--SmartThemeEmColor);
+    font-size: 0.9em;
+    font-style: italic;
+}
+
+.spendbook-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85em;
+}
+
+.spendbook-table th,
+.spendbook-table td {
+    padding: 2px 6px;
+    border-bottom: 1px solid var(--SmartThemeBorderColor);
+    text-align: left;
+    vertical-align: top;
+}
+
+.spendbook-table th {
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.spendbook-table td {
+    white-space: nowrap;
+}
+
 .spendbook-privacy-note {
     display: block;
     margin-top: 8px;

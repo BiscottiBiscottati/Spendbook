@@ -10,6 +10,26 @@
             <input id="spendbook_tracking_enabled" type="checkbox">
             <span>Track token usage</span>
         </label>
+        <div class="spendbook-panel">
+            <div class="spendbook-health" role="status"></div>
+            <div class="spendbook-empty"></div>
+            <table class="spendbook-table" hidden>
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Origin</th>
+                        <th>Label</th>
+                        <th>Provider</th>
+                        <th>Model</th>
+                        <th>Prompt</th>
+                        <th>Completion</th>
+                        <th>Latency</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody class="spendbook-rows"></tbody>
+            </table>
+        </div>
         <small class="spendbook-privacy-note">
             Spendbook records token counts, cost and latency for chat-completion
             requests made by this browser. It never stores prompt text, and an
