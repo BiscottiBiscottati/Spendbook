@@ -7,6 +7,7 @@
 
 .spendbook-panel {
     margin-top: 8px;
+    overflow-x: auto;
 }
 
 .spendbook-health {
