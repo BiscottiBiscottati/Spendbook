@@ -23,6 +23,7 @@ import { noteGenerationEnded, noteGenerationStarted } from './src/origin.js';
 import { getConfigurationLabel } from './src/configuration.js';
 import { publishSpendbookHost } from './src/host.js';
 import { buildUsageExport, usageExportFileName } from './src/export.js';
+import { describeImportResult, importableLegacyPrices, readLegacyChat } from './src/importer.js';
 import { mountSpendbookPanel } from './ui/panel.js';
 
 const EXTENSION_FOLDER = 'third-party/Spendbook';
@@ -62,7 +63,10 @@ const loadTokenizer = () => import('../../../../scripts/tokenizers.js');
 const estimatePromptTokens = createPromptTokenEstimator({ loadTokenizer });
 const estimateMessageTokens = createMessageTokenEstimator({ loadTokenizer });
 
-let refreshPanel = () => {};
+// The mounted drawer, once the template is in: the entry module repaints it and
+// hands it a table that changed outside its own edits.
+let panel = null;
+const refreshPanel = () => panel?.refresh();
 let generationStateBound = false;
 // The chat open before the last CHAT_CHANGED and the one open now. A rename of
 // the open chat reloads it under its new server-sanitized id before the event
@@ -126,6 +130,46 @@ function createChatExport() {
 }
 
 /**
+ * Stores a price table in Spendbook's namespace and saves it. The editor's own
+ * edits and an import both go through here; an import repaints the editor
+ * separately, because it brought rows the editor has never seen.
+ *
+ * @param {import('./src/prices.js').UsagePriceTable} prices
+ */
+function persistPrices(prices) {
+    setPriceTable(extensionSettings, prices);
+    saveSettingsDebounced();
+}
+
+/**
+ * One click of the drawer's Import button: the open chat's VectFox history and
+ * the old price table, read from the old namespaces and written only into
+ * Spendbook's own. The old keys are left exactly as they are, so a rollback to
+ * VectFox still has its ledger, and the old price table is only taken into an
+ * empty one.
+ *
+ * @returns {string} The line the drawer shows.
+ */
+function importLegacyHistory() {
+    const chatId = getChatId();
+    if (chatId == null) return '';
+    const legacy = readLegacyChat({ metadata: getMetadata(), chatId });
+    const counts = legacy ? ledger.importChat(chatId, legacy) : { added: 0, alreadyPresent: 0 };
+
+    const prices = importableLegacyPrices({
+        extensionSettings,
+        currentPrices: readSettings().prices,
+    });
+    if (prices) {
+        persistPrices(prices);
+        // The price editor was mounted with the table the settings had then.
+        panel?.setPrices(prices);
+    }
+
+    return describeImportResult({ found: !!legacy, ...counts, pricesImported: !!prices });
+}
+
+/**
  * Render the drawer template and mount it in the extensions settings panel.
  * @returns {Promise<void>}
  */
@@ -137,7 +181,7 @@ async function mountSettingsDrawer() {
     }
 
     const html = await renderExtensionTemplateAsync(EXTENSION_FOLDER, 'settings');
-    const panel = mountSpendbookPanel({
+    panel = mountSpendbookPanel({
         container,
         html,
         settings: readSettings(),
@@ -166,18 +210,15 @@ async function mountSettingsDrawer() {
             ledger.resetAllTime();
             refreshPanel();
         },
-        onPricesChange: (prices) => {
-            setPriceTable(extension_settings, prices);
-            saveSettingsDebounced();
-        },
+        onPricesChange: (prices) => persistPrices(prices),
         onStartRun: (label) => ledger.startRun({ chatId: getChatId(), label }),
         onExport: () => createChatExport(),
+        onImport: () => importLegacyHistory(),
         onIncludeChatNamesChange: (includeChatNames) => {
             setIncludeChatNames(extension_settings, includeChatNames);
             saveSettingsDebounced();
         },
     });
-    refreshPanel = panel.refresh;
 }
 
 /**

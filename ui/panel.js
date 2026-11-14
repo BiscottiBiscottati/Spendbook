@@ -36,9 +36,10 @@ const RESET_ALL_TIME_MESSAGE = 'Clear Spendbook’s all-time totals? '
  * @param {(prices: import('../src/prices.js').UsagePriceTable) => void} [options.onPricesChange] Persists the edited price table
  * @param {(label: string) => (object|null)} [options.onStartRun] Starts a measurement run in the open chat and returns it
  * @param {() => ({fileName: string, content: string}|null)} [options.onExport] Builds the JSON export of the open chat, which the panel saves; null means nothing was built
+ * @param {() => string} [options.onImport] Imports the open chat's VectFox history and returns the line the drawer shows; an empty string shows nothing
  * @param {(includeChatNames: boolean) => void} [options.onIncludeChatNamesChange] Persists the chat-name opt-in
  * @param {(message: string) => boolean} [options.confirmReset] Asks the user; declining leaves the ledger untouched
- * @returns {{root: HTMLElement, refresh: () => void}} The mounted drawer and its repaint function
+ * @returns {{root: HTMLElement, refresh: () => void, setPrices: (prices: import('../src/prices.js').UsagePriceTable) => void}} The mounted drawer, its repaint function, and the way a table changed outside the editor replaces it
  */
 export function mountSpendbookPanel({
     container,
@@ -51,6 +52,7 @@ export function mountSpendbookPanel({
     onPricesChange = () => {},
     onStartRun = () => null,
     onExport = () => null,
+    onImport = () => '',
     onIncludeChatNamesChange = () => {},
     confirmReset = defaultConfirmReset,
 }) {
@@ -82,12 +84,14 @@ export function mountSpendbookPanel({
     const runLabelInput = root.querySelector('.spendbook-run-label');
     const runStartButton = root.querySelector('.spendbook-run-start');
     const exportButton = root.querySelector('.spendbook-export-button');
+    const importButton = root.querySelector('.spendbook-import-button');
+    const importResult = root.querySelector('.spendbook-import-result');
     const includeChatNamesInput = root.querySelector(`#${INCLUDE_CHAT_NAMES_ID}`);
     if (!healthLine || !cardsContainer || !configurationTable || !configurationRows
         || !allTimeLine || !emptyLine || !table || !rows
         || !retentionLine || !resetChatButton || !resetAllTimeButton
         || !runCurrentLine || !runFilter || !runLabelInput || !runStartButton
-        || !exportButton || !includeChatNamesInput) {
+        || !exportButton || !importButton || !importResult || !includeChatNamesInput) {
         throw new Error('Spendbook: the settings template is incomplete.');
     }
 
@@ -110,6 +114,9 @@ export function mountSpendbookPanel({
         if (snapshot.chatId !== activeChatId) {
             activeChatId = snapshot.chatId;
             selectedRunId = '';
+            // The line describes one chat's import; another chat has not been
+            // imported just because it is now open.
+            importResult.textContent = '';
         }
         const view = buildUsageView({ ...snapshot, selectedRunId, prices: editor.prices });
         // A run the chat no longer lists (a reset, a rename) stops being a filter.
@@ -126,6 +133,7 @@ export function mountSpendbookPanel({
         emptyLine.hidden = !view.empty;
         table.hidden = view.empty;
         retentionLine.textContent = view.retention.label;
+        importButton.disabled = !activeChatId;
         rows.replaceChildren(...view.rows.map(renderRow));
     };
 
@@ -190,6 +198,11 @@ export function mountSpendbookPanel({
         const file = onExport();
         if (file) saveJsonFile(file.fileName, file.content);
     });
+    importButton.addEventListener('click', () => {
+        const result = onImport();
+        if (result) importResult.textContent = result;
+        refresh();
+    });
 
     runStartButton.addEventListener('click', () => {
         // Starting a run adds a window; it deliberately leaves the current view
@@ -202,7 +215,16 @@ export function mountSpendbookPanel({
 
     refresh();
 
-    return { root, refresh };
+    return {
+        root,
+        refresh,
+        // The import brings a whole table with it, and the editor was mounted
+        // with the one the settings had then.
+        setPrices: (prices) => {
+            editor.setPrices(prices);
+            refresh();
+        },
+    };
 }
 
 /** One option of the run filter, whose "All runs" entry is the empty value. */

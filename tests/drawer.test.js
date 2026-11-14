@@ -27,6 +27,7 @@ function mount({
     onPricesChange = () => {},
     onStartRun = () => null,
     onExport = () => null,
+    onImport = () => '',
     onIncludeChatNamesChange = () => {},
     confirmReset = () => true,
 } = {}) {
@@ -43,6 +44,7 @@ function mount({
         onPricesChange,
         onStartRun,
         onExport,
+        onImport,
         onIncludeChatNamesChange,
         confirmReset,
     });
@@ -1002,5 +1004,66 @@ describe('Spendbook drawer — export', () => {
         vi.useRealTimers();
         delete globalThis.URL.createObjectURL;
         delete globalThis.URL.revokeObjectURL;
+    });
+});
+
+describe('Spendbook drawer — import', () => {
+    beforeEach(() => {
+        document.body.innerHTML = '';
+    });
+
+    it('offers one import button and says what it will and will not touch', () => {
+        const { container } = mount();
+
+        const button = container.querySelector('.spendbook-import-button');
+        expect(button.textContent).toBe('Import this chat');
+        expect(container.querySelector('.spendbook-import-result').textContent).toBe('');
+        expect(container.querySelector('.spendbook-import-hint').textContent).toContain('left exactly as it is');
+    });
+
+    it('imports on a click and shows the line the entry module returned', () => {
+        const onImport = vi.fn(() => '2 records added, 0 already present. Prices imported.');
+        const { container } = mount({
+            onImport,
+            getSnapshot: () => ({ chatId: 'chat-a', records: [], trackingEnabled: false, health: null }),
+        });
+
+        container.querySelector('.spendbook-import-button').click();
+
+        expect(onImport).toHaveBeenCalledTimes(1);
+        expect(container.querySelector('.spendbook-import-result').textContent)
+            .toBe('2 records added, 0 already present. Prices imported.');
+    });
+
+    it('needs an open chat, and does not carry one chat’s result into the next', () => {
+        const snapshot = { chatId: 'chat-a', records: [], trackingEnabled: false, health: null };
+        const { container, panel } = mount({ getSnapshot: () => snapshot, onImport: () => '1 record added, 0 already present. Prices not imported.' });
+        const button = container.querySelector('.spendbook-import-button');
+        const result = container.querySelector('.spendbook-import-result');
+
+        expect(button.disabled).toBe(false);
+        button.click();
+        expect(result.textContent).toBe('1 record added, 0 already present. Prices not imported.');
+
+        snapshot.chatId = 'chat-b';
+        panel.refresh();
+        expect(result.textContent).toBe('');
+        expect(button.disabled).toBe(false);
+
+        snapshot.chatId = null;
+        panel.refresh();
+        expect(button.disabled).toBe(true);
+    });
+
+    it('repaints the price editor when imported prices arrive', () => {
+        const { container, panel } = mount({ settings: { prices: { currency: 'USD', updated: '', entries: [] } } });
+
+        panel.setPrices({ ...ACME_PRICES, currency: 'EUR', updated: '2026-10-01' });
+
+        const rows = container.querySelectorAll('.spendbook-price-rows tr');
+        expect(rows).toHaveLength(1);
+        expect(rows[0].querySelector('[data-price-field="provider"]').value).toBe('acme');
+        expect(rows[0].querySelector('[data-price-field="output"]').value).toBe('0.6');
+        expect(container.querySelector('.spendbook-price-currency').value).toBe('EUR');
     });
 });

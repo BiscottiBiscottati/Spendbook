@@ -48,6 +48,7 @@ import {
     createUsageArchive,
     isCompletedUsageRecord,
     isUsageAccumulatorEmpty,
+    isUsageArchiveEmpty,
     mergeUsageAccumulators,
     mergeUsageArchives,
     normalizeUsageAccumulator,
@@ -251,6 +252,100 @@ export class UsageLedger {
             archived: this.archivedFor(chatId),
             allTime: this.allTimeForView(),
         };
+    }
+
+    /**
+     * Adopts one chat's legacy VectFox history, as the import button hands it
+     * over. Nothing is replaced: records are de-duplicated by id, runs by run id,
+     * and the folded-row counters are added to the chat's own.
+     *
+     * The counters are adopted once. They have no row ids to de-duplicate by, so
+     * a second click would otherwise double every one of them; the chat records
+     * that its legacy counters were adopted.
+     *
+     * Rows are de-duplicated by id, and also by VectFox's content revision: a row
+     * the retention cap has folded since the first import is no longer in the row
+     * list, and copying it back would undo the cap and count it twice. A revision
+     * this chat already took therefore proves the whole old record set is in —
+     * live or folded.
+     *
+     * Imported records count in the all-time aggregate and in this chat's bucket
+     * like any row that lands here, so the all-time line and the chat agree. The
+     * old all-time aggregate is VectFox's own storage key and this import does
+     * not read it.
+     *
+     * @param {string|null} chatId
+     * @param {{revision?: number|null, records?: object[], runs?: object[], currentRunId?: string|null, archived?: object}} imported
+     * @returns {{added: number, alreadyPresent: number}} Rows copied in, and rows
+     *   already in this chat.
+     */
+    importChat(chatId, imported = {}) {
+        const key = chatKey(chatId);
+        if (!key) return { added: 0, alreadyPresent: 0 };
+        const state = this.#ensureState(chatId);
+        let changed = false;
+
+        const records = (Array.isArray(imported?.records) ? imported.records : []).filter(recordKey);
+        const revision = Number.isFinite(imported?.revision) ? imported.revision : null;
+        const alreadyTaken = revision != null && state.legacyImportedRevision === revision;
+
+        let added = 0;
+        let alreadyPresent = 0;
+        if (alreadyTaken) {
+            // This record set is the one the chat already took; some of its rows
+            // may be folded into the counters now, which is where they belong.
+            alreadyPresent = records.length;
+        } else {
+            const known = new Set(state.records.map(recordKey).filter(Boolean));
+            for (const record of records) {
+                const id = recordKey(record);
+                if (known.has(id)) {
+                    alreadyPresent += 1;
+                    continue;
+                }
+                known.add(id);
+                const row = { ...record, chatId };
+                state.records.push(row);
+                this.#addToAllTime(row);
+                added += 1;
+                changed = true;
+            }
+            if (added > 0) {
+                this.#evictOverflow(state);
+                this.#persistAllTime();
+            }
+        }
+
+        const runs = normalizeRuns(imported?.runs);
+        if (runs.some((run) => !state.runs.some((own) => own.runId === run.runId))) {
+            state.runs = mergeRuns(state.runs, runs);
+            changed = true;
+        }
+        const currentRunId = mergeCurrentRunId(state.currentRunId, imported?.currentRunId, state.runs);
+        if (currentRunId !== state.currentRunId) {
+            state.currentRunId = currentRunId;
+            changed = true;
+        }
+
+        const archived = normalizeUsageArchive(imported?.archived);
+        if (!state.legacyCountersAdopted && !isUsageArchiveEmpty(archived)) {
+            state.archived = mergeUsageArchives(state.archived, archived);
+            state.legacyCountersAdopted = true;
+            changed = true;
+        }
+
+        // Remember the old record set, so the next click does not copy back the
+        // rows the cap has folded in the meantime.
+        if (revision != null && records.length > 0 && state.legacyImportedRevision !== revision) {
+            state.legacyImportedRevision = revision;
+            changed = true;
+        }
+
+        if (changed) {
+            state.revision += 1;
+            this.#commit(chatId, state);
+        }
+        return { added, alreadyPresent };
     }
 
     /**
@@ -732,6 +827,14 @@ export class UsageLedger {
         target.runs = mergeRuns(target.runs, source.runs);
         target.currentRunId = mergeCurrentRunId(target.currentRunId, source.currentRunId, target.runs);
         target.promptFingerprints = mergePromptFingerprints(target.promptFingerprints, source.promptFingerprints);
+        // The folded counters were adopted by one of the two states, and merging
+        // them already counted the other's rows, so the result is adopted too.
+        target.legacyCountersAdopted = target.legacyCountersAdopted === true
+            || source.legacyCountersAdopted === true;
+        target.legacyImportedRevision = latestRevision(
+            target.legacyImportedRevision,
+            source.legacyImportedRevision,
+        );
     }
 
     #rememberRename(oldId, newId) {
@@ -836,6 +939,12 @@ function createChatState(chatId) {
         runs: [],
         currentRunId: null,
         promptFingerprints: {},
+        // Whether the chat has already taken VectFox's folded-row counters: they
+        // carry no ids, so an import may adopt them only once.
+        legacyCountersAdopted: false,
+        // VectFox's content revision the chat last imported, so a click knows the
+        // old record set is already in even after the cap folded some of it.
+        legacyImportedRevision: null,
         revision: 0,
     };
 }
@@ -849,6 +958,8 @@ function stateFromNamespace(namespace) {
         runs,
         currentRunId: normalizeCurrentRunId(namespace?.currentRunId, runs),
         promptFingerprints: normalizePromptFingerprints(namespace?.promptFingerprints),
+        legacyCountersAdopted: namespace?.legacyCountersAdopted === true,
+        legacyImportedRevision: finiteRevision(namespace?.legacyImportedRevision),
         revision: Number.isFinite(namespace?.revision) ? namespace.revision : 0,
     };
 }
@@ -863,6 +974,8 @@ function serializeState(state) {
         runs: (state.runs ?? []).map((run) => ({ ...run })),
         currentRunId: state.currentRunId ?? null,
         promptFingerprints: normalizePromptFingerprints(state.promptFingerprints),
+        legacyCountersAdopted: state.legacyCountersAdopted === true,
+        legacyImportedRevision: finiteRevision(state.legacyImportedRevision),
     };
 }
 
@@ -878,6 +991,8 @@ function normalizeNamespace(raw) {
         runs,
         currentRunId: normalizeCurrentRunId(raw.currentRunId, runs),
         promptFingerprints: normalizePromptFingerprints(raw.promptFingerprints),
+        legacyCountersAdopted: raw.legacyCountersAdopted === true,
+        legacyImportedRevision: finiteRevision(raw.legacyImportedRevision),
     };
 }
 
@@ -1048,6 +1163,29 @@ function normalizeRunLabel(label, ordinal) {
 function normalizeCurrentRunId(value, runs) {
     if (typeof value !== 'string' || !value) return null;
     return runs.some((run) => run.runId === value) ? value : null;
+}
+
+/**
+ * The newer of two remembered legacy revisions; a side that remembers none
+ * contributes nothing.
+ *
+ * @param {number|null} left
+ * @param {number|null} right
+ * @returns {number|null}
+ */
+function latestRevision(left, right) {
+    const known = [left, right].filter((value) => Number.isFinite(value));
+    return known.length ? Math.max(...known) : null;
+}
+
+/**
+ * A persisted legacy revision, or null when there is none to remember.
+ *
+ * @param {unknown} value
+ * @returns {number|null}
+ */
+function finiteRevision(value) {
+    return Number.isFinite(value) ? value : null;
 }
 
 function recordKey(record) {

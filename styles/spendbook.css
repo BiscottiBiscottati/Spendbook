@@ -242,17 +242,20 @@
     font-weight: 600;
 }
 
-.spendbook-export {
+.spendbook-export,
+.spendbook-import {
     margin-top: 12px;
 }
 
-.spendbook-export-title {
+.spendbook-export-title,
+.spendbook-import-title {
     margin-bottom: 4px;
     font-weight: 600;
 }
 
 .spendbook-export-hint,
-.spendbook-export-optin-hint {
+.spendbook-export-optin-hint,
+.spendbook-import-hint {
     display: block;
     margin-bottom: 6px;
     color: var(--SmartThemeEmColor);
@@ -260,10 +263,19 @@
     line-height: 1.4;
 }
 
-.spendbook-export .menu_button {
+.spendbook-export .menu_button,
+.spendbook-import .menu_button {
     width: auto;
     margin: 4px 0;
     white-space: nowrap;
+}
+
+/* The click's result: empty until an import runs, so it takes no space then. */
+.spendbook-import-result:not(:empty) {
+    display: block;
+    margin-top: 6px;
+    color: var(--SmartThemeEmColor);
+    font-size: 0.9em;
 }
 
 .spendbook-prices {

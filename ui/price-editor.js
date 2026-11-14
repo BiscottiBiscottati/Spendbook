@@ -32,7 +32,7 @@ const FIELD_LABELS = Object.freeze({
  * @param {HTMLElement} options.section The `.spendbook-prices` section
  * @param {import('../src/prices.js').UsagePriceTable} options.prices Stored table, normalized on mount
  * @param {(prices: import('../src/prices.js').UsagePriceTable) => void} [options.onChange] Called with the edited table after every edit
- * @returns {{prices: import('../src/prices.js').UsagePriceTable}} The live table, read by the results painter
+ * @returns {{prices: import('../src/prices.js').UsagePriceTable, setPrices: (prices: import('../src/prices.js').UsagePriceTable) => void}} The live table, read by the results painter, and the way a stored table that changed underneath the drawer replaces it
  */
 export function mountPriceEditor({ section, prices, onChange = () => {} }) {
     const rows = section?.querySelector('.spendbook-price-rows');
@@ -106,6 +106,19 @@ export function mountPriceEditor({ section, prices, onChange = () => {} }) {
         // A getter, so the results painter always reads the table as it is now.
         get prices() {
             return table;
+        },
+
+        /**
+         * Replace the whole table, as an import does. The rows are rebuilt
+         * because every field of every row may have changed.
+         *
+         * @param {import('../src/prices.js').UsagePriceTable} prices
+         */
+        setPrices(prices) {
+            table = normalizePriceTable(prices);
+            currencyInput.value = table.currency;
+            updatedInput.value = table.updated;
+            renderRows();
         },
     };
 }

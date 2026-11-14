@@ -21,6 +21,10 @@ the first release. The decision and its reasoning are in
   comparison runs, and a flag for requests that break the prompt prefix.
 - Compare labelled configurations side by side — requests, tokens, cost and
   hit rate per configuration label a host extension set.
+- Import an existing VectFox chat's usage on request: its records, runs and
+  folded-row counters move into Spendbook's namespace, the old origins are
+  translated, and the old data is left untouched so a rollback still has its
+  ledger. Prices come over only into an empty table.
 - Export one versioned JSON file for a bug report: this chat's records, its
   measurement runs, the counters for the rows the retention cap folded and the
   all-time totals — a fixed field list, with **no chat identifiers** and no chat
@@ -38,7 +42,9 @@ the first release. The decision and its reasoning are in
 
 Two one-way calls let another extension describe its own traffic. Spendbook never
 calls into your extension and never reads its settings, so neither side imports
-the other.
+the other. The one exception is the import you click in the drawer, and only it:
+it reads VectFox's old usage namespace and price table once, writes nothing
+there, and never runs on its own.
 
 ### Mark your own request as internal
 
