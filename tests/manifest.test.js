@@ -3,10 +3,14 @@ import { join } from 'node:path';
 
 import { describe, it, expect } from 'vitest';
 
-const manifest = JSON.parse(readFileSync(join(process.cwd(), 'manifest.json'), 'utf8'));
-const packageJson = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'));
-const changelog = readFileSync(join(process.cwd(), 'CHANGELOG.md'), 'utf8');
-const readme = readFileSync(join(process.cwd(), 'README.md'), 'utf8');
+const readRepoFile = (name) => readFileSync(join(process.cwd(), name), 'utf8');
+const manifest = JSON.parse(readRepoFile('manifest.json'));
+const packageJson = JSON.parse(readRepoFile('package.json'));
+const changelog = readRepoFile('CHANGELOG.md');
+const readme = readRepoFile('README.md');
+
+/** A version is text, not a pattern: `1.0.0+build` must not match `1x0x0`. */
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 describe('release number', () => {
     // SillyTavern only displays the manifest version and updates through git, so
@@ -17,12 +21,14 @@ describe('release number', () => {
     });
 
     it('has a dated entry in the changelog', () => {
-        const version = manifest.version.replaceAll('.', '\\.');
-        expect(changelog).toMatch(new RegExp(`^## \\[${version}\\] — \\d{4}-\\d{2}-\\d{2}$`, 'm'));
+        const version = escapeRegExp(manifest.version);
+        expect(changelog).toMatch(new RegExp(`^## \\[${version}\\] - \\d{4}-\\d{2}-\\d{2}$`, 'm'));
     });
 
     it('is the version the README shows a stranger', () => {
-        expect(readme).toContain(`**Version ${manifest.version}**`);
+        // Not pinned to the bold markup: a README reformat must not fail CI,
+        // but the number a stranger reads must be the manifest's.
+        expect(readme).toMatch(new RegExp(`\\bVersion ${escapeRegExp(manifest.version)}\\b`));
     });
 });
 

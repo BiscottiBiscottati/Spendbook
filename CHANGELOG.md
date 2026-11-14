@@ -9,7 +9,7 @@ here.
 
 ## [Unreleased]
 
-## [1.0.0] — 2026-11-14
+## [1.0.0] - 2026-11-14
 
 First release: usage accounting as a standalone extension, no vector backend and
 no other extension required.

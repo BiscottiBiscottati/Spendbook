@@ -56,8 +56,11 @@ the term below, not a synonym.
 - **Retention cap** — the newest 500 rows kept per chat. Older rows are
   **folded**: their tokens, counts and dollars survive as counters (the
   **archive**), their individual rows do not.
-- **Prefix fingerprint** — per-message hash and estimated token count, kept in
-  memory only, compared positionally against the previous comparable request.
+- **Prefix fingerprint** — per-message hash and estimated token count, compared
+  positionally against the previous comparable request. The last baseline per
+  provider, model and origin is persisted beside the chat's ledger as hashes and
+  counts only; the request's own fingerprint is transient and no record holds
+  it.
 - **Prefix breaker** — a request sharing at least 2,048 estimated tokens with its
   comparable predecessor while reporting zero cached tokens. A suspicion, not a
   measured cause.

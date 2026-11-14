@@ -93,9 +93,11 @@ responses your SillyTavern already fetches.
 
 ## What it deliberately does not record
 
-- **Prompt text.** For the prefix comparison the request messages are reduced, in
-  memory, to one hash and one token count per message, and the text is dropped;
-  the fingerprint is never stored. No record, export or drawer shows prompt
+- **Prompt text.** For the prefix comparison each request is reduced to one hash
+  and one token count per message, and the message text is dropped. The chat
+  keeps the last comparable baseline — those hashes and counts — beside its
+  ledger so the comparison survives a reload, and a row keeps only the shared
+  token count and the breaker flag. No record, export or drawer shows prompt
   content.
 - **Request bodies, headers, API keys or response bodies.** The observer reads
   the usage numbers out of a response and leaves your response untouched.
@@ -116,10 +118,12 @@ responses your SillyTavern already fetches.
   `/api/backends/chat-completions/generate` is observed.
 - **Calls that do not pass through this browser.** Server-side work, background
   jobs that run elsewhere, and other tabs or devices are invisible.
-- **Non-SSE provider handlers.** The Anthropic- and Gemini-native handlers do not
-  produce the SSE tail this parser reads, so those responses are not counted.
-- **Requests sent while tracking is off.** Nothing is wrapped, so nothing is
-  recorded; rows from before you turned it on do not appear retroactively.
+- **Provider usage from the Anthropic- and Gemini-native handlers.** They answer
+  in a shape the usage reader does not understand, so a row from those handlers
+  keeps the call but not its provider tokens: the prompt is an estimate and the
+  completion count stays blank.
+- **Requests sent while tracking is off.** They are not recorded, and rows from
+  before you turned it on do not appear retroactively.
 
 ## For extension authors
 
@@ -159,9 +163,8 @@ await fetch('/api/backends/chat-completions/generate', init);
 A marked request is recorded with origin `internal` and your label instead of
 being taken for the chat's reply, even while a generation is running.
 
-If you would rather call a helper than write the symbol, Spendbook's
-`src/origin.js` exports `markInternalRequest(init, label)`, and the same helper is
-on the page surface:
+If you would rather call a helper than write the symbol, the page surface has
+one; no import across extension folders is needed or expected:
 
 ```js
 const init = globalThis.Spendbook?.markInternalRequest({ method: 'POST', body }, 'MyFeature')

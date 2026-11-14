@@ -121,6 +121,6 @@ settings namespace, CSS and tab strip.
 This decision was written while the feature still lived inside VectFox, and is
 kept as ADR-0005 in the project that planned the split. This file is the
 public-safe copy of that record, renumbered because this repository's own
-decisions start at 0001. Host-specific identifiers — source paths, storage keys
-and that project's own layout — are abstracted here; the context, the decision
-and the consequences are unchanged.
+decisions start at 0001. Source paths and storage keys are abstracted here; the
+context's figures and the vocabulary it quotes are kept as written. The context,
+the decision and the consequences are unchanged.
