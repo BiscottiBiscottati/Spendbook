@@ -344,6 +344,75 @@ describe('Spendbook per-origin sums', () => {
     });
 });
 
+describe('Spendbook per-configuration sums', () => {
+    it('splits the visible rows and their dollars by configuration label', () => {
+        const totals = sumUsageRecords({
+            records: [
+                record({ ...ACME_PRICED_ROW, recordId: 'r-1' }),
+                record({ ...ACME_PRICED_ROW, recordId: 'r-2', configuration: 'batch-8' }),
+            ],
+            prices: ACME_PRICES,
+        });
+
+        expect(totals.byConfiguration.default).toMatchObject({
+            configuration: null,
+            counters: { requests: 1, promptTokens: 1200 },
+        });
+        expect(totals.byConfiguration.default.cost.estimated).toBeCloseTo(0.0003252, 12);
+        expect(totals.byConfiguration['batch-8']).toMatchObject({
+            configuration: 'batch-8',
+            counters: { requests: 1, promptTokens: 1200 },
+        });
+        expect(totals.byConfiguration['batch-8'].cost.estimated).toBeCloseTo(0.0003252, 12);
+    });
+
+    it('groups a label by its normalized shape', () => {
+        const totals = sumUsageRecords({
+            records: [
+                record({ ...ACME_PRICED_ROW, recordId: 'r-1', configuration: '  batch-8  ' }),
+                record({ ...ACME_PRICED_ROW, recordId: 'r-2', configuration: 'batch-8' }),
+            ],
+            prices: ACME_PRICES,
+        });
+
+        expect(Object.keys(totals.byConfiguration)).toEqual(['batch-8']);
+        expect(totals.byConfiguration['batch-8'].counters).toMatchObject({ requests: 2, promptTokens: 2400 });
+        expect(totals.byConfiguration['batch-8'].cost.estimated).toBeCloseTo(0.0006504, 12);
+    });
+
+    it('attributes a folded row to its configuration, dollars included', () => {
+        const archive = createUsageArchive();
+        addRecordToUsageArchive(archive, record({
+            ...ACME_PRICED_ROW,
+            recordId: 'r-folded',
+            configuration: 'batch-8',
+        }));
+
+        const totals = sumUsageRecords({ records: [], archive, prices: ACME_PRICES });
+
+        expect(totals.byConfiguration['batch-8'].counters).toMatchObject({ requests: 1, promptTokens: 1200 });
+        expect(totals.byConfiguration['batch-8'].cost.estimated).toBeCloseTo(0.0003252, 12);
+        expect(totals.byConfiguration['batch-8'].saving.estimated).toBeCloseTo(0.0000588, 12);
+        // Nothing was folded without a label, so the default group does not
+        // exist rather than reading as an empty one.
+        expect(totals.byConfiguration.default).toBeUndefined();
+    });
+
+    it('groups the price inputs of folded rows per configuration as well as origin', () => {
+        const archive = createUsageArchive();
+        addRecordToUsageArchive(archive, record({ ...ACME_PRICED_ROW, recordId: 'r-1', configuration: 'batch-8' }));
+        addRecordToUsageArchive(archive, record({ ...ACME_PRICED_ROW, recordId: 'r-2', configuration: 'batch-8' }));
+
+        expect(Object.keys(archive.byModel)).toEqual(['acme\u0000m1\u0000story\u0001batch-8']);
+        expect(archive.byModel['acme\u0000m1\u0000story\u0001batch-8']).toMatchObject({
+            provider: 'acme',
+            model: 'm1',
+            origin: 'story',
+            configuration: 'batch-8',
+        });
+    });
+});
+
 describe('Spendbook evicted-row archive', () => {
     it('folds one evicted row into totals, origin and configuration groups', () => {
         const archive = createUsageArchive();

@@ -59,6 +59,8 @@ export function mountSpendbookPanel({
 
     const healthLine = root.querySelector('.spendbook-health');
     const cardsContainer = root.querySelector('.spendbook-cards');
+    const configurationTable = root.querySelector('.spendbook-configuration-table');
+    const configurationRows = root.querySelector('.spendbook-configuration-rows');
     const allTimeLine = root.querySelector('.spendbook-alltime');
     const emptyLine = root.querySelector('.spendbook-empty');
     const table = root.querySelector('.spendbook-table');
@@ -71,7 +73,8 @@ export function mountSpendbookPanel({
     const runFilter = root.querySelector('.spendbook-run-filter');
     const runLabelInput = root.querySelector('.spendbook-run-label');
     const runStartButton = root.querySelector('.spendbook-run-start');
-    if (!healthLine || !cardsContainer || !allTimeLine || !emptyLine || !table || !rows
+    if (!healthLine || !cardsContainer || !configurationTable || !configurationRows
+        || !allTimeLine || !emptyLine || !table || !rows
         || !retentionLine || !resetChatButton || !resetAllTimeButton
         || !runCurrentLine || !runFilter || !runLabelInput || !runStartButton) {
         throw new Error('Spendbook: the settings template has no usage table.');
@@ -105,6 +108,8 @@ export function mountSpendbookPanel({
         healthLine.dataset.state = view.health.state;
         renderRunBar(view.runs, { canStart: !!snapshot.chatId });
         cardsContainer.replaceChildren(...view.cards.map(renderCard));
+        configurationTable.hidden = view.configurations.empty;
+        configurationRows.replaceChildren(...view.configurations.groups.map(renderConfigurationRow));
         allTimeLine.textContent = view.allTime.label;
         emptyLine.textContent = view.empty ? view.emptyMessage : '';
         emptyLine.hidden = !view.empty;
@@ -266,6 +271,7 @@ function renderRow(row) {
     appendCell(tr, 'time', row.timeLabel);
     appendCell(tr, 'origin', row.originLabel);
     appendCell(tr, 'label', row.labelLabel);
+    appendCell(tr, 'configuration', row.configurationLabel);
     appendCell(tr, 'provider', row.providerLabel);
     appendCell(tr, 'model', row.modelLabel);
     appendCell(tr, 'prompt', row.promptLabel);
@@ -276,6 +282,51 @@ function renderRow(row) {
     appendCell(tr, 'latency', row.latencyLabel);
     appendCell(tr, 'status', row.statusLabel);
     appendCell(tr, 'source', row.sourceLabel);
+    return tr;
+}
+
+/**
+ * One comparison row: the configuration's name and request count, then the
+ * same metrics the cards carry, so a labelled configuration is read the same
+ * way as the chat it was measured in.
+ *
+ * @param {object} group
+ * @returns {HTMLElement}
+ */
+function renderConfigurationRow(group) {
+    const tr = document.createElement('tr');
+    tr.dataset.configuration = group.key;
+    if (group.isDefault) tr.dataset.default = 'true';
+
+    const name = document.createElement('td');
+    name.className = 'spendbook-configuration-cell-configuration';
+    name.textContent = group.label;
+    tr.append(name);
+
+    const requests = document.createElement('td');
+    requests.className = 'spendbook-configuration-cell-requests';
+    requests.textContent = group.requestsLabel;
+    if (group.detailLabel) {
+        const detail = document.createElement('small');
+        detail.className = 'spendbook-configuration-requests-detail';
+        detail.textContent = group.detailLabel;
+        requests.append(detail);
+    }
+    tr.append(requests);
+
+    for (const metric of group.metrics) {
+        const cell = document.createElement('td');
+        cell.className = `spendbook-configuration-cell-${metric.key}`;
+        cell.dataset.source = metric.source;
+        cell.textContent = metric.value;
+        if (metric.note) {
+            const note = document.createElement('small');
+            note.className = 'spendbook-configuration-metric-note';
+            note.textContent = metric.note;
+            cell.append(note);
+        }
+        tr.append(cell);
+    }
     return tr;
 }
 

@@ -7,6 +7,7 @@
  * change cannot reach into the ledger.
  */
 
+import { DEFAULT_CONFIGURATION_LABEL, normalizeConfigurationLabel } from '../src/configuration.js';
 import { USAGE_ORIGINS } from '../src/origin.js';
 import { resolveUsageCost } from '../src/prices.js';
 import { coverageFor, hitRateFor, isCompletedUsageRecord, sumUsageRecords } from '../src/stats.js';
@@ -78,6 +79,7 @@ const SOURCE_LABELS = Object.freeze({
  *   allTime: {requests: number, excluded: number, chats: number, label: string},
  *   runs: {items: object[], selectedRunId: string|null, currentLabel: string},
  *   cards: object[],
+ *   configurations: {groups: object[], empty: boolean},
  *   empty: boolean,
  *   emptyMessage: string,
  *   rows: object[],
@@ -103,6 +105,9 @@ export function buildUsageView({
         ? allRecords.filter((record) => record?.runId === runView.selectedRunId)
         : allRecords;
     const rows = visibleRecords.map((record) => buildRow(record, prices));
+    // A folded row carries no run id, so a run's view cannot include the
+    // retention counters.
+    const usage = sumUsageRecords({ records: visibleRecords, archive: filtered ? null : archive, prices });
 
     return {
         trackingEnabled,
@@ -110,13 +115,8 @@ export function buildUsageView({
         retention: describeRetention(retention, { filtered }),
         allTime: describeAllTime(allTime, { hasPrices: hasPriceEntries(prices) }),
         runs: runView,
-        cards: buildCards(
-            // A folded row carries no run id, so a run's view cannot include the
-            // retention counters.
-            sumUsageRecords({ records: visibleRecords, archive: filtered ? null : archive, prices }),
-            prices,
-            { filtered },
-        ),
+        cards: buildCards(usage, prices, { filtered }),
+        configurations: buildConfigurationGroups(usage, prices),
         empty: rows.length === 0,
         emptyMessage: describeEmptyMessage({ trackingEnabled, filtered }),
         rows,
@@ -265,6 +265,67 @@ export function describeAllTime(allTime = {}, { hasPrices = false } = {}) {
         estimatedPromptTokens,
         label: `All time: ${formatCountLabel(requests, 'completed request')}${stopped}, across ${formatCountLabel(chats, 'chat')}${measured}${estimated}.${costNote}`,
     };
+}
+
+/**
+ * The comparison below the cards: one row per configuration label, side by
+ * side, so a labelled change can be told from an unlabelled one. The rows come
+ * from the same summary the cards use — visible rows folded with the rows the
+ * retention cap evicted, priced with the table in force now — so a comparison
+ * row and the table under it never describe different requests.
+ *
+ * `default` is the baseline, so it is always the first row; the labelled groups
+ * follow alphabetically, which keeps a group's row in place as requests arrive.
+ *
+ * @param {{byConfiguration: Object<string, {configuration: string|null, counters: object, cost: object, saving: object}>}} usage
+ * @param {import('../src/prices.js').UsagePriceTable|null} prices
+ * @returns {{groups: object[], empty: boolean}}
+ */
+function buildConfigurationGroups(usage, prices) {
+    const groups = Object.entries(usage.byConfiguration ?? {}).map(([key, group]) => {
+        const counters = group.counters;
+        const requests = toCount(counters.requests);
+        const excluded = toCount(counters.excludedRequests);
+        const measuredPrompt = toCount(counters.promptTokens);
+        const estimatedPrompt = toCount(counters.estimatedPromptTokens);
+        const knownPrompt = measuredPrompt + estimatedPrompt;
+        const rate = hitRateFor(counters);
+        const cost = describeDollars(group.cost, prices?.currency);
+
+        return {
+            key,
+            label: group.configuration ?? DEFAULT_CONFIGURATION_LABEL,
+            isDefault: group.configuration === null,
+            // A group with only failed rows says so instead of reading as an
+            // empty configuration.
+            requestsLabel: requests > 0
+                ? formatCountLabel(requests, 'completed request')
+                : formatCountLabel(excluded, 'failed or stopped request'),
+            detailLabel: requests > 0 && excluded > 0
+                ? formatCountLabel(excluded, 'failed or stopped request')
+                : '',
+            metrics: [
+                promptMetric(counters, { measuredPrompt, estimatedPrompt }),
+                tokenMetric('completion', 'Completion', counters.completionTokens, counters.completionTokenRequests),
+                {
+                    key: 'hitRate',
+                    label: 'Hit rate',
+                    value: formatPercent(rate),
+                    source: rate == null ? 'unavailable' : 'measured',
+                    note: ratedNote(counters, knownPrompt),
+                },
+                dollarsMetric('cost', 'Cost', group.cost, requests, cost),
+            ],
+        };
+    });
+
+    groups.sort((left, right) => {
+        if (left.isDefault !== right.isDefault) return left.isDefault ? -1 : 1;
+        if (left.label === right.label) return 0;
+        return left.label < right.label ? -1 : 1;
+    });
+
+    return { groups, empty: groups.length === 0 };
 }
 
 /**
@@ -569,6 +630,9 @@ function buildRow(record, prices) {
         timeLabel: formatTime(record.timestamp),
         originLabel: KNOWN_ORIGINS.has(record.origin) ? record.origin : PLACEHOLDER,
         labelLabel: record.label || PLACEHOLDER,
+        // The row's own configuration: what was in force when it was sent, not
+        // what the page has now. An unlabelled row is a `default` row.
+        configurationLabel: normalizeConfigurationLabel(record.configuration) ?? DEFAULT_CONFIGURATION_LABEL,
         providerLabel: record.provider || 'unknown',
         modelLabel: record.model || 'unknown',
         promptLabel: prompt == null

@@ -15,9 +15,16 @@ import { UsageLedger } from './src/ledger.js';
 import { createMessageTokenEstimator, createPromptTokenEstimator } from './src/estimator.js';
 import { getUsageObserverHealth, installUsageObserver } from './src/observer.js';
 import { noteGenerationEnded, noteGenerationStarted } from './src/origin.js';
+import { getConfigurationLabel } from './src/configuration.js';
+import { publishSpendbookHost } from './src/host.js';
 import { mountSpendbookPanel } from './ui/panel.js';
 
 const EXTENSION_FOLDER = 'third-party/Spendbook';
+
+// Published at load, not at mount: another extension may label a request while
+// the drawer is still being rendered, and the label is read when a request is
+// sent. The surface carries only the two documented host calls.
+publishSpendbookHost();
 
 const getChatId = () => getContext()?.chatId ?? null;
 const getMetadata = () => getContext()?.chatMetadata ?? null;
@@ -79,6 +86,7 @@ function installObserver() {
         // The run is resolved when the request is sent, so a run started while a
         // request is in flight does not claim it.
         getRunId: () => ledger.currentRunIdFor(getChatId()),
+        getConfigurationLabel,
         estimatePromptTokens,
         estimateMessageTokens,
         handleRecord: (record, fingerprint) => ledger.add(record, fingerprint),

@@ -148,6 +148,30 @@
     margin-top: 6px;
 }
 
+/* The configuration comparison: one row per label, so a labelled change can be
+   read across the requests it was measured in. */
+.spendbook-configurations {
+    margin: 10px 0;
+}
+
+.spendbook-configurations-title {
+    font-weight: 600;
+}
+
+.spendbook-configurations-hint {
+    display: block;
+    margin: 4px 0 6px;
+    color: var(--SmartThemeEmColor);
+    font-size: 0.85em;
+}
+
+.spendbook-configuration-requests-detail,
+.spendbook-configuration-metric-note {
+    display: block;
+    color: var(--SmartThemeEmColor);
+    font-size: 0.85em;
+}
+
 .spendbook-help {
     margin-top: 12px;
 }

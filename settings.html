@@ -29,6 +29,30 @@
                 </small>
             </section>
             <div class="spendbook-cards" role="group" aria-label="Usage summary"></div>
+            <section class="spendbook-configurations" role="group" aria-label="Configuration comparison">
+                <div class="spendbook-configurations-title">Configurations</div>
+                <small class="spendbook-configurations-hint">
+                    A host extension labels the requests it drives with
+                    <code>globalThis.Spendbook.setConfigurationLabel()</code>; requests sent with
+                    no label are compared as <em>default</em>. A row keeps the label that was in
+                    force when it was sent, not the one in force when it was captured.
+                </small>
+                <div class="spendbook-table-wrap">
+                    <table class="spendbook-table spendbook-configuration-table" hidden>
+                        <thead>
+                        <tr>
+                            <th>Configuration</th>
+                            <th>Requests</th>
+                            <th>Prompt</th>
+                            <th>Completion</th>
+                            <th>Hit rate</th>
+                            <th>Cost</th>
+                        </tr>
+                        </thead>
+                        <tbody class="spendbook-configuration-rows"></tbody>
+                    </table>
+                </div>
+            </section>
             <div class="spendbook-empty"></div>
             <div class="spendbook-table-wrap">
                 <table class="spendbook-table" hidden>
@@ -36,7 +60,8 @@
                     <tr>
                         <th>Time</th>
                         <th>Origin</th>
-                        <th>Label</th>
+                        <th>Origin label</th>
+                        <th>Configuration</th>
                         <th>Provider</th>
                         <th>Model</th>
                         <th>Prompt</th>
@@ -119,6 +144,10 @@
                     cache boundary changed the prompt, or the provider dropped the cache; it is a
                     suspicion, not a measurement of the cause. A request that reported no cache count at
                     all is never flagged, and neither is a failed or stopped one.</li>
+                <li>Configuration: the label a host extension set for the requests it drove,
+                    read when each request was sent, so a label set before a run covers that run
+                    and never relabels a row already recorded. It is never saved as a setting;
+                    a request with no label is shown and compared as <em>default</em>.</li>
                 <li>Coverage: the share of prompt tokens the provider actually reported. An estimated prompt
                     counts as uncovered, so a provider that omits usage lowers coverage instead of
                     disappearing from it. A completed request that reported no prompt count at all caps

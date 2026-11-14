@@ -798,3 +798,73 @@ describe('Spendbook drawer — prefix diagnostics', () => {
         expect(cell.querySelector('.spendbook-prefix-flag')).toBeNull();
     });
 });
+
+describe('Spendbook drawer — configuration comparison', () => {
+    beforeEach(() => {
+        document.body.innerHTML = '';
+    });
+
+    it('compares the labelled configurations side by side, default first', () => {
+        const { container } = mount({
+            settings: { trackingEnabled: true, prices: ACME_PRICES },
+            getSnapshot: () => ({
+                records: [
+                    pricedRow({ recordId: 'r-1', configuration: null }),
+                    pricedRow({ recordId: 'r-2', configuration: null }),
+                    pricedRow({ recordId: 'r-3', configuration: 'batch-8' }),
+                ],
+                trackingEnabled: true,
+                health: { captured: 3 },
+            }),
+        });
+
+        const rows = container.querySelectorAll('.spendbook-configuration-rows tr');
+        expect(rows).toHaveLength(2);
+        expect(rows[0].querySelector('.spendbook-configuration-cell-configuration').textContent).toBe('default');
+        expect(rows[0].dataset.default).toBe('true');
+        expect(rows[0].querySelector('.spendbook-configuration-cell-requests').textContent).toBe('2 completed requests');
+        expect(rows[0].querySelector('.spendbook-configuration-cell-hitRate').textContent).toBe('33.3%');
+        expect(rows[0].querySelector('.spendbook-configuration-cell-cost').textContent).toBe('$0.00065040');
+
+        expect(rows[1].querySelector('.spendbook-configuration-cell-configuration').textContent).toBe('batch-8');
+        expect(rows[1].dataset.default).toBeUndefined();
+        expect(rows[1].querySelector('.spendbook-configuration-cell-requests').textContent).toBe('1 completed request');
+        expect(rows[1].querySelector('.spendbook-configuration-cell-cost').textContent).toBe('$0.00032520');
+    });
+
+    it('shows no comparison table while nothing is recorded', () => {
+        const { container } = mount({
+            settings: { trackingEnabled: true },
+            getSnapshot: () => ({ records: [], trackingEnabled: true, health: { captured: 0 } }),
+        });
+
+        expect(container.querySelector('.spendbook-configuration-table').hidden).toBe(true);
+        expect(container.querySelector('.spendbook-configuration-rows').children).toHaveLength(0);
+    });
+
+    it('names the configuration on each request row, default when unlabelled', () => {
+        const { container } = mount({
+            settings: { trackingEnabled: true },
+            getSnapshot: () => ({
+                records: [
+                    row({ recordId: 'r-1', configuration: null }),
+                    row({ recordId: 'r-2', configuration: 'batch-8' }),
+                ],
+                trackingEnabled: true,
+                health: { captured: 2 },
+            }),
+        });
+
+        const cells = [...container.querySelectorAll('.spendbook-rows .spendbook-cell-configuration')];
+        expect(cells.map((cell) => cell.textContent)).toEqual(['default', 'batch-8']);
+    });
+
+    it('documents the host call in the drawer and in the help', () => {
+        const { container } = mount({ settings: { trackingEnabled: true } });
+
+        expect(container.querySelector('.spendbook-configurations').textContent)
+            .toContain('globalThis.Spendbook.setConfigurationLabel()');
+        expect(container.querySelector('.spendbook-help').textContent)
+            .toMatch(/Configuration: the label a host extension set/);
+    });
+});

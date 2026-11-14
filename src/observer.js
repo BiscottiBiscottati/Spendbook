@@ -14,6 +14,10 @@
  */
 
 import { createUsageId } from './ids.js';
+import {
+    getConfigurationLabel as readPageConfigurationLabel,
+    normalizeConfigurationLabel,
+} from './configuration.js';
 import { resolveUsageOrigin, USAGE_ORIGINS } from './origin.js';
 import { createPromptFingerprint } from './prefix.js';
 
@@ -35,6 +39,9 @@ export const USAGE_SINK_KEY = '__spendbook_usage_sink__';
  *   was sent.
  * @param {() => (string|null)} [options.getRunId] Measurement run open when the
  *   request was sent.
+ * @param {() => (string|null)} [options.getConfigurationLabel] Configuration
+ *   label in force when the request was sent, read then and never at capture
+ *   time so a label cannot retro-label a row.
  * @param {(record: object, fingerprint: object|null) => void} [options.handleRecord]
  *   Sink that receives one normalized record per captured request, plus the
  *   transient prefix fingerprint beside it — hashes and counts only, never the
@@ -56,6 +63,7 @@ export function installUsageObserver({
     isEnabled = () => false,
     getChatId = () => null,
     getRunId = () => null,
+    getConfigurationLabel = readPageConfigurationLabel,
     handleRecord = () => {},
     estimatePromptTokens = null,
     estimateMessageTokens = null,
@@ -72,6 +80,7 @@ export function installUsageObserver({
         isEnabled,
         getChatId,
         getRunId,
+        getConfigurationLabel,
         handleRecord,
         estimatePromptTokens,
         estimateMessageTokens,
@@ -101,10 +110,13 @@ export function installUsageObserver({
         // response lands — a chat switch mid-flight must not move the record.
         const chatId = readIdentifier(sink, 'getChatId');
         const runId = readIdentifier(sink, 'getRunId');
+        // Same rule for the configuration label: a host that changes it while
+        // the request is in flight must not move this row into the new group.
+        const configuration = readConfigurationLabel(sink);
 
         // The capture context is built once; only the response-specific
         // fields differ between the paths.
-        const captureContext = { sink, init, chatId, runId, origin, startedAt };
+        const captureContext = { sink, init, chatId, runId, origin, configuration, startedAt };
 
         let response;
         try {
@@ -209,6 +221,14 @@ function readIdentifier(sink, getter) {
     }
 }
 
+function readConfigurationLabel(sink) {
+    try {
+        return sink?.getConfigurationLabel?.() ?? null;
+    } catch {
+        return null;
+    }
+}
+
 /**
  * Attribution is read through the sink so the wrapper installed by an earlier
  * module instance uses the reloaded instance's generation state.
@@ -263,7 +283,7 @@ function notifySettled(sink) {
  * numbers, and the caller's rejection or error response is left untouched.
  */
 async function captureFailedRecord(context) {
-    const { sink, init, chatId, runId, origin, httpStatus, status, startedAt, latencyMs } = context;
+    const { sink, init, chatId, runId, origin, configuration, httpStatus, status, startedAt, latencyMs } = context;
     const body = readBodyOrCountSkipped(sink, init);
     if (!body) return;
     const messageTokenCounts = await estimateMessageCounts(sink, body);
@@ -272,6 +292,7 @@ async function captureFailedRecord(context) {
         chatId,
         runId,
         origin,
+        configuration,
         httpStatus,
         usage: null,
         status,
@@ -287,7 +308,7 @@ async function captureFailedRecord(context) {
  * response; a parse failure or provider error is a status, never a throw.
  */
 async function captureJsonRecord(context) {
-    const { sink, init, chatId, runId, origin, clone, startedAt, latencyMs, httpStatus } = context;
+    const { sink, init, chatId, runId, origin, configuration, clone, startedAt, latencyMs, httpStatus } = context;
     const body = readBodyOrCountSkipped(sink, init);
     if (!body) return;
 
@@ -313,6 +334,7 @@ async function captureJsonRecord(context) {
         chatId,
         runId,
         origin,
+        configuration,
         httpStatus,
         responseModel: data?.model ?? null,
         responseId: data?.id ?? null,
@@ -341,7 +363,7 @@ function emitRecord(sink, record, fingerprint) {
  * never awaited here.
  */
 async function captureStreamedRecord(context) {
-    const { sink, init, chatId, runId, origin, clone, startedAt, latencyMs, httpStatus } = context;
+    const { sink, init, chatId, runId, origin, configuration, clone, startedAt, latencyMs, httpStatus } = context;
     const body = readBodyOrCountSkipped(sink, init);
     if (!body) {
         // Nothing to attribute: release the cloned branch instead of letting
@@ -362,6 +384,7 @@ async function captureStreamedRecord(context) {
             chatId,
             runId,
             origin,
+            configuration,
             httpStatus,
             responseId: result.responseId,
             usage: result.usage,
@@ -593,6 +616,7 @@ function buildRecord({
     chatId,
     runId,
     origin,
+    configuration = null,
     httpStatus,
     responseModel = null,
     responseId = null,
@@ -626,6 +650,9 @@ function buildRecord({
         runId: typeof runId === 'string' ? runId : null,
         origin: origin?.origin ?? USAGE_ORIGINS.INTERNAL,
         label: origin?.label ?? null,
+        // The configuration in force when the request was sent; null means the
+        // row belongs to the `default` group.
+        configuration: normalizeConfigurationLabel(configuration),
         provider,
         model,
         responseId,

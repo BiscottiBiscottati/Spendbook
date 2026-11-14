@@ -767,3 +767,106 @@ describe('Spendbook view — prefix diagnostics', () => {
         expect(view.rows[0].prefixBreakerLabel).toBe('');
     });
 });
+
+describe('Spendbook view — configuration comparison', () => {
+    it('compares the labelled configurations side by side, default first', () => {
+        const view = buildUsageView({
+            records: [
+                record({ recordId: 'r-1', configuration: null }),
+                record({
+                    recordId: 'r-2',
+                    configuration: 'batch-8',
+                    promptTokens: 800,
+                    hitTokens: 800,
+                    completionTokens: 100,
+                    totalTokens: 900,
+                }),
+            ],
+            trackingEnabled: true,
+            prices: ACME_PRICES,
+        });
+
+        expect(view.configurations.groups.map((group) => group.label)).toEqual(['default', 'batch-8']);
+        const [base, after] = view.configurations.groups;
+        expect(base.isDefault).toBe(true);
+        expect(after.isDefault).toBe(false);
+        expect(base.requestsLabel).toBe('1 completed request');
+        expect(after.requestsLabel).toBe('1 completed request');
+
+        expect(metric(base, 'prompt').value).toBe('1,200');
+        expect(metric(base, 'completion').value).toBe('340');
+        expect(metric(base, 'hitRate').value).toBe('33.3%');
+        expect(metric(base, 'cost').value).toBe('$0.00032520');
+
+        // 800 cached tokens at $0.003/M and 100 output tokens at $0.60/M:
+        // 2.4 micro-dollars of hits plus 60 micro-dollars of output.
+        expect(metric(after, 'prompt').value).toBe('800');
+        expect(metric(after, 'completion').value).toBe('100');
+        expect(metric(after, 'hitRate').value).toBe('100%');
+        expect(metric(after, 'cost').value).toBe('$0.00006240');
+    });
+
+    it('keeps a row unlabelled only when no host set a configuration', () => {
+        const view = buildUsageView({
+            records: [
+                record({ recordId: 'r-1', configuration: null }),
+                record({ recordId: 'r-2', configuration: '  batch-8  ' }),
+            ],
+            trackingEnabled: true,
+        });
+
+        expect(view.rows.map((row) => row.configurationLabel)).toEqual(['default', 'batch-8']);
+        expect(view.configurations.groups.map((group) => group.label).sort()).toEqual(['batch-8', 'default']);
+    });
+
+    it('folds the evicted rows into their configuration group', () => {
+        const archive = createUsageArchive();
+        addRecordToUsageArchive(archive, record({
+            ...ACME_PRICED_ROW,
+            recordId: 'r-folded',
+            configuration: 'batch-8',
+        }));
+
+        const view = buildUsageView({
+            records: [],
+            trackingEnabled: true,
+            archive,
+            prices: ACME_PRICES,
+        });
+
+        expect(view.configurations.groups).toHaveLength(1);
+        const [group] = view.configurations.groups;
+        expect(group.label).toBe('batch-8');
+        expect(group.requestsLabel).toBe('1 completed request');
+        expect(metric(group, 'prompt').value).toBe('1,200');
+        expect(metric(group, 'hitRate').value).toBe('33.3%');
+        expect(metric(group, 'cost').value).toBe('$0.00032520');
+    });
+
+    it('shows no comparison at all when nothing was recorded', () => {
+        const view = buildUsageView({ records: [], trackingEnabled: true });
+
+        expect(view.configurations.groups).toEqual([]);
+        expect(view.configurations.empty).toBe(true);
+    });
+
+    it('compares only the run’s configurations while a run is shown', () => {
+        const archive = createUsageArchive();
+        addRecordToUsageArchive(archive, record({ ...ACME_PRICED_ROW, recordId: 'r-folded', configuration: 'before' }));
+
+        const view = buildUsageView({
+            records: [
+                record({ ...ACME_PRICED_ROW, recordId: 'r-run-2', configuration: 'after', runId: 'run-2' }),
+                record({ ...ACME_PRICED_ROW, recordId: 'r-run-1', configuration: 'before', runId: 'run-1' }),
+            ],
+            trackingEnabled: true,
+            archive,
+            prices: ACME_PRICES,
+            runs: CHAT_RUNS,
+            selectedRunId: 'run-2',
+        });
+
+        // A folded row carries no run, so it cannot join a run's comparison.
+        expect(view.configurations.groups.map((group) => group.label)).toEqual(['after']);
+    });
+});

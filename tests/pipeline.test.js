@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 import { installUsageObserver, getUsageObserverHealth } from '../src/observer.js';
 import { noteGenerationEnded, noteGenerationStarted, markInternalRequest } from '../src/origin.js';
+import { getConfigurationLabel, setConfigurationLabel } from '../src/configuration.js';
 import { USAGE_CHAT_METADATA_KEY, UsageLedger } from '../src/ledger.js';
 
 const GENERATE_URL = '/api/backends/chat-completions/generate';
@@ -894,5 +895,52 @@ describe('Spendbook observer pipeline — prefix diagnostics', () => {
         });
         // 100 for 'a' against the story baseline, not against the internal one.
         expect(story).toMatchObject({ origin: 'story', sharedPrefixTokens: 100 });
+    });
+});
+
+describe('Spendbook observer pipeline — configuration label', () => {
+    beforeEach(() => {
+        setConfigurationLabel(null);
+    });
+
+    it('stamps the row with the label in force when the request was sent', async () => {
+        let release = () => {};
+        const gate = new Promise((resolve) => {
+            release = resolve;
+        });
+        const pipeline = createPipeline({ responseGate: gate });
+
+        setConfigurationLabel('before');
+        const pending = send(pipeline);
+        // The label changes while the request is still in flight: the row
+        // belongs to the configuration that sent it, not to this one.
+        setConfigurationLabel('after');
+        release();
+        await pending;
+
+        await waitForRecords(pipeline, 1);
+        expect(getConfigurationLabel()).toBe('after');
+        expect(pipeline.records()[0].configuration).toBe('before');
+    });
+
+    it('stores the normalized label on the row', async () => {
+        const pipeline = createPipeline();
+        setConfigurationLabel('  gpt-4o   temp 0.8 ');
+
+        const response = await send(pipeline);
+        await response.json();
+        await waitForRecords(pipeline, 1);
+
+        expect(pipeline.records()[0].configuration).toBe('gpt-4o temp 0.8');
+    });
+
+    it('leaves the configuration unset when no host set a label', async () => {
+        const pipeline = createPipeline();
+
+        const response = await send(pipeline);
+        await response.json();
+        await waitForRecords(pipeline, 1);
+
+        expect(pipeline.records()[0].configuration).toBeNull();
     });
 });

@@ -36,6 +36,7 @@ const ACCUMULATOR_FIELDS = Object.freeze([
     'totalTokenRequests',
 ]);
 
+import { DEFAULT_CONFIGURATION_LABEL, normalizeConfigurationLabel } from './configuration.js';
 import { USAGE_ORIGINS } from './origin.js';
 import { resolveUsageCost } from './prices.js';
 
@@ -272,8 +273,8 @@ export function addRecordToUsageArchive(archive, record) {
     if (!archive.byOrigin[origin]) archive.byOrigin[origin] = createUsageAccumulator();
     addRecordToUsageAccumulator(archive.byOrigin[origin], record);
 
-    const configuration = configurationLabel(record.configuration);
-    const key = configuration ?? 'default';
+    const configuration = normalizeConfigurationLabel(record.configuration);
+    const key = configuration ?? DEFAULT_CONFIGURATION_LABEL;
     if (!archive.byConfiguration[key]) {
         archive.byConfiguration[key] = { configuration, accumulator: createUsageAccumulator() };
     }
@@ -338,30 +339,36 @@ export function isUsageArchiveEmpty(archive) {
 
 /**
  * The whole picture for one chat: visible rows plus the folded counters, with
- * every dollar figure resolved against the given price table — overall and per
- * origin, so a card above the table describes the same requests the table below
- * it shows, including the rows the retention cap folded. Dollars stay split by
- * source — a provider-reported amount and a table-derived one are not the same
- * unit and are never added together here.
+ * every dollar figure resolved against the given price table — overall, per
+ * origin and per configuration label, so a card or a comparison row describes
+ * the same requests the table below it shows, including the rows the retention
+ * cap folded. Dollars stay split by source — a provider-reported amount and a
+ * table-derived one are not the same unit and are never added together here.
  *
  * @param {object} [options]
  * @param {object[]} [options.records] Retained records for one chat.
- * @param {{total?: object, byOrigin?: object, byModel?: object}|null} [options.archive] Counters of the folded rows.
+ * @param {{total?: object, byOrigin?: object, byConfiguration?: object, byModel?: object}|null} [options.archive] Counters of the folded rows.
  * @param {import('./prices.js').UsagePriceTable|null} [options.prices] Table in force now
  * @returns {{
  *   counters: object,
  *   cost: {measured: number, measuredRequests: number, estimated: number, estimatedRequests: number, requests: number},
  *   saving: {measured: number, measuredRequests: number, estimated: number, estimatedRequests: number, requests: number},
  *   byOrigin: Object<string, {counters: object, cost: object, saving: object}>,
+ *   byConfiguration: Object<string, {configuration: string|null, counters: object, cost: object, saving: object}>,
  * }}
  */
 export function sumUsageRecords({ records = [], archive = null, prices = null } = {}) {
     const overall = createSummaryTotals();
     const byOrigin = new Map();
+    const byConfiguration = new Map();
 
     for (const record of Array.isArray(records) ? records : []) {
         const origin = normalizeUsageOrigin(record?.origin);
-        addRecordToSummaries([overall, summaryFor(byOrigin, origin)], record, prices);
+        addRecordToSummaries([
+            overall,
+            summaryFor(byOrigin, origin),
+            configurationSummaryFor(byConfiguration, record?.configuration),
+        ], record, prices);
     }
 
     const folded = normalizeUsageArchive(archive);
@@ -370,12 +377,19 @@ export function sumUsageRecords({ records = [], archive = null, prices = null } 
         const summary = summaryFor(byOrigin, origin);
         summary.counters = mergeUsageAccumulators(summary.counters, counters);
     }
+    for (const entry of Object.values(folded.byConfiguration)) {
+        const summary = configurationSummaryFor(byConfiguration, entry.configuration);
+        summary.counters = mergeUsageAccumulators(summary.counters, entry.accumulator);
+    }
     for (const bucket of Object.values(folded.byModel)) {
         const targets = [overall];
         // A group folded before the archive recorded origins has no origin to
         // name, so its dollars stay in the overall total rather than being
         // attributed to a guess.
         if (bucket.origin) targets.push(summaryFor(byOrigin, bucket.origin));
+        // A row folded without a configuration is a `default` row: that group
+        // is a real one, so its dollars belong there.
+        targets.push(configurationSummaryFor(byConfiguration, bucket.configuration));
         addFoldedDollars(bucket, prices, targets);
     }
 
@@ -384,6 +398,12 @@ export function sumUsageRecords({ records = [], archive = null, prices = null } 
         cost: finishDollarTotals(overall.cost),
         saving: finishDollarTotals(overall.saving),
         byOrigin: Object.fromEntries([...byOrigin].map(([origin, summary]) => [origin, {
+            counters: summary.counters,
+            cost: finishDollarTotals(summary.cost),
+            saving: finishDollarTotals(summary.saving),
+        }])),
+        byConfiguration: Object.fromEntries([...byConfiguration].map(([key, summary]) => [key, {
+            configuration: summary.configuration,
             counters: summary.counters,
             cost: finishDollarTotals(summary.cost),
             saving: finishDollarTotals(summary.saving),
@@ -412,6 +432,24 @@ function createSummaryTotals() {
 function summaryFor(byOrigin, origin) {
     if (!byOrigin.has(origin)) byOrigin.set(origin, createSummaryTotals());
     return byOrigin.get(origin);
+}
+
+/**
+ * One configuration group's summary. An unlabelled row belongs to the
+ * `default` group, and the group keeps the label it is displayed under so a
+ * comparison row never re-derives it.
+ *
+ * @param {Map<string, object>} byConfiguration
+ * @param {unknown} configuration
+ * @returns {{configuration: string|null, counters: object, cost: object, saving: object}}
+ */
+function configurationSummaryFor(byConfiguration, configuration) {
+    const label = normalizeConfigurationLabel(configuration);
+    const key = label ?? DEFAULT_CONFIGURATION_LABEL;
+    if (!byConfiguration.has(key)) {
+        byConfiguration.set(key, { configuration: label, ...createSummaryTotals() });
+    }
+    return byConfiguration.get(key);
 }
 
 /**
@@ -507,9 +545,10 @@ function addRecordToModelBucket(archive, record) {
     const provider = modelKeyPart(record.provider) || 'unknown';
     const model = modelKeyPart(record.model) || 'unknown';
     const origin = normalizeUsageOrigin(record.origin);
-    const key = modelBucketKey(provider, model, origin);
+    const configuration = normalizeConfigurationLabel(record.configuration);
+    const key = modelBucketKey(provider, model, origin, configuration);
     if (!archive.byModel) archive.byModel = {};
-    if (!archive.byModel[key]) archive.byModel[key] = createModelBucket(provider, model, origin);
+    if (!archive.byModel[key]) archive.byModel[key] = createModelBucket(provider, model, origin, configuration);
     const bucket = archive.byModel[key];
 
     // A row without a reported figure is the one the table has to price — but
@@ -532,29 +571,36 @@ function addRecordToModelBucket(archive, record) {
 }
 
 /**
- * The key of one provider-and-model group, split per origin as well: a folded
- * row's dollars have to land on the card of the work that sent it.
+ * The key of one provider-and-model group, split per origin and configuration
+ * label as well: a folded row's dollars have to land on the card of the work
+ * that sent it and on the comparison row of the configuration in force. The
+ * label appends after its own separator, so an origin and a label can never
+ * spell the same key.
  *
  * @param {string} provider
  * @param {string} model
  * @param {string|null} origin
+ * @param {string|null} [configuration]
  * @returns {string}
  */
-function modelBucketKey(provider, model, origin) {
-    return origin ? `${provider}\u0000${model}\u0000${origin}` : `${provider}\u0000${model}`;
+function modelBucketKey(provider, model, origin, configuration = null) {
+    const base = origin ? `${provider}\u0000${model}\u0000${origin}` : `${provider}\u0000${model}`;
+    return configuration ? `${base}\u0001${configuration}` : base;
 }
 
 /**
  * @param {string} provider
  * @param {string} model
  * @param {string|null} [origin]
+ * @param {string|null} [configuration]
  * @returns {object}
  */
-function createModelBucket(provider, model, origin = null) {
+function createModelBucket(provider, model, origin = null, configuration = null) {
     return {
         provider,
         model,
         origin,
+        configuration,
         unpricedCost: createUsageAccumulator(),
         unpricedSaving: createUsageAccumulator(),
         reportedCost: 0,
@@ -575,6 +621,7 @@ function normalizeModelBucket(entry) {
         // An archive written before origins were recorded has none: null keeps
         // those dollars in the overall total instead of guessing a card.
         KNOWN_ORIGINS.has(entry.origin) ? entry.origin : null,
+        normalizeConfigurationLabel(entry.configuration),
     );
     bucket.unpricedCost = normalizeUsageAccumulator(entry.unpricedCost);
     bucket.unpricedSaving = normalizeUsageAccumulator(entry.unpricedSaving);
@@ -595,7 +642,7 @@ function normalizeModelBucket(entry) {
  * @returns {object} The same map.
  */
 function modelBucketSlot(byModel, bucket) {
-    const key = modelBucketKey(bucket.provider, bucket.model, bucket.origin);
+    const key = modelBucketKey(bucket.provider, bucket.model, bucket.origin, bucket.configuration);
     byModel[key] = byModel[key] ? mergeModelBuckets(byModel[key], bucket) : bucket;
     return byModel;
 }
@@ -650,10 +697,6 @@ function modelKeyPart(value) {
  */
 function normalizeUsageOrigin(origin) {
     return KNOWN_ORIGINS.has(origin) ? origin : 'internal';
-}
-
-function configurationLabel(value) {
-    return typeof value === 'string' && value.trim() ? value : null;
 }
 
 /**
