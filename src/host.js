@@ -14,7 +14,7 @@
 import { setConfigurationLabel } from './configuration.js';
 import { markInternalRequest } from './origin.js';
 
-export const SPENDBOOK_HOST_NAME = 'Spendbook';
+const SPENDBOOK_HOST_NAME = 'Spendbook';
 
 /**
  * Publishes `target.Spendbook`. Publishing twice replaces the surface, so a

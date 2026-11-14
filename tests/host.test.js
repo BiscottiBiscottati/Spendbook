@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 
 import { getConfigurationLabel, setConfigurationLabel } from '../src/configuration.js';
-import { publishSpendbookHost, SPENDBOOK_HOST_NAME } from '../src/host.js';
+import { publishSpendbookHost } from '../src/host.js';
 import { resolveUsageOrigin } from '../src/origin.js';
 
 describe('Spendbook host surface', () => {
@@ -20,7 +20,6 @@ describe('Spendbook host surface', () => {
         const page = {};
         const surface = publishSpendbookHost({ target: page });
 
-        expect(SPENDBOOK_HOST_NAME).toBe('Spendbook');
         expect(page.Spendbook).toBe(surface);
         expect(Object.keys(surface).sort()).toEqual(['markInternalRequest', 'setConfigurationLabel']);
     });

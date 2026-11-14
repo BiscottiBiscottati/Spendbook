@@ -90,6 +90,7 @@ function createPipeline({ enabled = true, observerOptions = {}, responseGate = n
         isEnabled: () => enabledNow,
         getChatId: () => chatId,
         getRunId: () => ledger.currentRunIdFor(chatId),
+        getConfigurationLabel,
         handleRecord: (record, fingerprint) => ledger.add(record, fingerprint),
         ...observerOptions,
     });
@@ -932,6 +933,35 @@ describe('Spendbook observer pipeline — configuration label', () => {
         await waitForRecords(pipeline, 1);
 
         expect(pipeline.records()[0].configuration).toBe('gpt-4o temp 0.8');
+    });
+
+    it('stamps a streamed row with the label read at send, not at capture', async () => {
+        const pipeline = createPipeline();
+        pipeline.setResponse(sseResponse([
+            'data: {"id":"gen-1","choices":[{"index":0,"delta":{"content":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11}}\n\n',
+            'data: [DONE]\n\n',
+        ]));
+
+        setConfigurationLabel('streamed');
+        const pending = send(pipeline, requestInit({ stream: true }));
+        setConfigurationLabel(null);
+        await pending;
+        await waitForRecords(pipeline, 1);
+
+        expect(pipeline.records()[0].configuration).toBe('streamed');
+    });
+
+    it('stamps a failed row with the label read at send', async () => {
+        const pipeline = createPipeline();
+        pipeline.setResponse(jsonResponse({ error: { message: 'rate limited' } }, { status: 429 }));
+
+        setConfigurationLabel('failed');
+        const pending = send(pipeline);
+        setConfigurationLabel(null);
+        await pending;
+        await waitForRecords(pipeline, 1);
+
+        expect(pipeline.records()[0]).toMatchObject({ status: 'error', configuration: 'failed' });
     });
 
     it('leaves the configuration unset when no host set a label', async () => {

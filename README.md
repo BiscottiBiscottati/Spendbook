@@ -73,7 +73,8 @@ The label is page-lifetime and is never saved as a setting. Spendbook reads it
 when a request is sent, so a label set before a run covers that run, and a row is
 never relabelled after it was captured. It is trimmed, inner whitespace is
 collapsed and it is capped at 64 characters; `null` or a blank value clears it.
-Requests sent with no label are shown and compared as `default`.
+Requests sent with no label are shown and compared as `default`, and that name is
+reserved for them — a label spelled `default` joins the unlabelled group.
 
 `globalThis.Spendbook` carries only those two calls. If it is absent, Spendbook is
 not installed — the guarded call keeps your extension working on its own.

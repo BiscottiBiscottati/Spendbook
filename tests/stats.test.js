@@ -398,6 +398,44 @@ describe('Spendbook per-configuration sums', () => {
         expect(totals.byConfiguration.default).toBeUndefined();
     });
 
+    it('normalizes a persisted configuration label and merges the groups it collapses', () => {
+        const archive = normalizeUsageArchive({
+            byConfiguration: {
+                '  batch  8 ': { configuration: '  batch  8 ', accumulator: { requests: 1, promptTokens: 500 } },
+                'batch 8': { configuration: 'batch 8', accumulator: { requests: 2, promptTokens: 700 } },
+            },
+        });
+
+        expect(Object.keys(archive.byConfiguration)).toEqual(['batch 8']);
+        expect(archive.byConfiguration['batch 8']).toMatchObject({
+            configuration: 'batch 8',
+            accumulator: { requests: 3, promptTokens: 1200 },
+        });
+    });
+
+    it('keeps the dollars of an archive that recorded no configuration counters in the total only', () => {
+        const totals = sumUsageRecords({
+            records: [],
+            archive: {
+                total: { requests: 1, measuredRequests: 1, promptTokens: 1200, hitTokens: 400, completionTokens: 340 },
+                byModel: {
+                    'acme\u0000m1\u0000story': {
+                        provider: 'acme',
+                        model: 'm1',
+                        origin: 'story',
+                        unpricedCost: { requests: 1, promptTokens: 1200, hitTokens: 400, completionTokens: 340 },
+                    },
+                },
+            },
+            prices: ACME_PRICES,
+        });
+
+        // A group with a cost and no requests would be a row the drawer cannot
+        // explain, so the dollars stay in the overall total.
+        expect(totals.cost.estimated).toBeCloseTo(0.0003252, 12);
+        expect(totals.byConfiguration).toEqual({});
+    });
+
     it('groups the price inputs of folded rows per configuration as well as origin', () => {
         const archive = createUsageArchive();
         addRecordToUsageArchive(archive, record({ ...ACME_PRICED_ROW, recordId: 'r-1', configuration: 'batch-8' }));

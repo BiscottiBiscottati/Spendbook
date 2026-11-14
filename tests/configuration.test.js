@@ -14,6 +14,7 @@ import {
     normalizeConfigurationLabel,
     setConfigurationLabel,
 } from '../src/configuration.js';
+import { readSpendbookSettings } from '../src/settings.js';
 
 describe('Spendbook configuration label — normalization', () => {
     it('trims the ends and collapses inner whitespace', () => {
@@ -32,6 +33,16 @@ describe('Spendbook configuration label — normalization', () => {
         expect(normalizeConfigurationLabel(undefined)).toBeNull();
         expect(normalizeConfigurationLabel(42)).toBeNull();
         expect(normalizeConfigurationLabel({ label: 'x' })).toBeNull();
+    });
+
+    it('caps a label in characters, never splitting a surrogate pair', () => {
+        const emoji = '😀';
+        const exact = 'a'.repeat(CONFIGURATION_LABEL_MAX_LENGTH - 1) + emoji;
+        expect(normalizeConfigurationLabel(exact)).toBe(exact);
+
+        const capped = normalizeConfigurationLabel('a'.repeat(CONFIGURATION_LABEL_MAX_LENGTH) + emoji);
+        expect(capped).toBe('a'.repeat(CONFIGURATION_LABEL_MAX_LENGTH));
+        expect(capped.isWellFormed()).toBe(true);
     });
 
     it('caps a long label without leaving a trailing space', () => {
@@ -58,6 +69,16 @@ describe('Spendbook configuration label — set and clear', () => {
     it('stores the normalized label for the page', () => {
         expect(setConfigurationLabel('  gpt-4o   high temp ')).toBe('gpt-4o high temp');
         expect(getConfigurationLabel()).toBe('gpt-4o high temp');
+    });
+
+    it('never becomes a saved setting', () => {
+        const extensionSettings = {};
+        setConfigurationLabel('after');
+
+        // Page-lifetime only: the settings namespace is untouched, so a reload
+        // starts with no label and no install inherits one.
+        expect(extensionSettings).toEqual({});
+        expect(readSpendbookSettings(extensionSettings)).not.toHaveProperty('configurationLabel');
     });
 
     it('clears with null or an empty label', () => {

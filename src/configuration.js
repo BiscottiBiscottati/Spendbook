@@ -34,11 +34,13 @@ export function normalizeConfigurationLabel(value) {
     if (typeof value !== 'string') return null;
     const text = value.trim().replace(/\s+/g, ' ');
     if (!text) return null;
-    return text.length > CONFIGURATION_LABEL_MAX_LENGTH
-        // The cap can land on a space; trimming the slice keeps a label from
-        // ending on whitespace.
-        ? text.slice(0, CONFIGURATION_LABEL_MAX_LENGTH).trim()
-        : text;
+    // Counted in characters, not UTF-16 units: a cap that splits a surrogate
+    // pair leaves a lone surrogate in a label the drawer must render.
+    const characters = [...text];
+    if (characters.length <= CONFIGURATION_LABEL_MAX_LENGTH) return text;
+    // The cap can land on a space; trimming the slice keeps a label from
+    // ending on whitespace.
+    return characters.slice(0, CONFIGURATION_LABEL_MAX_LENGTH).join('').trim();
 }
 
 /**

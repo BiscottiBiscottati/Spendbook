@@ -298,34 +298,28 @@ function renderConfigurationRow(group) {
     tr.dataset.configuration = group.key;
     if (group.isDefault) tr.dataset.default = 'true';
 
-    const name = document.createElement('td');
-    name.className = 'spendbook-configuration-cell-configuration';
-    name.textContent = group.label;
-    tr.append(name);
+    // The comparison table has its own cell class prefix, so the request
+    // table's `.spendbook-cell-*` hooks never match a comparison cell.
+    const prefix = 'spendbook-configuration-cell';
+    appendCell(tr, 'configuration', group.label, { prefix });
 
-    const requests = document.createElement('td');
-    requests.className = 'spendbook-configuration-cell-requests';
-    requests.textContent = group.requestsLabel;
+    const requests = appendCell(tr, 'requests', group.requestsLabel, { prefix });
     if (group.detailLabel) {
         const detail = document.createElement('small');
         detail.className = 'spendbook-configuration-requests-detail';
         detail.textContent = group.detailLabel;
         requests.append(detail);
     }
-    tr.append(requests);
 
     for (const metric of group.metrics) {
-        const cell = document.createElement('td');
-        cell.className = `spendbook-configuration-cell-${metric.key}`;
+        const cell = appendCell(tr, metric.key, metric.value, { prefix });
         cell.dataset.source = metric.source;
-        cell.textContent = metric.value;
         if (metric.note) {
             const note = document.createElement('small');
             note.className = 'spendbook-configuration-metric-note';
             note.textContent = metric.note;
             cell.append(note);
         }
-        tr.append(cell);
     }
     return tr;
 }
@@ -349,9 +343,9 @@ function appendPrefixCell(row, entry) {
     return cell;
 }
 
-function appendCell(row, field, text) {
+function appendCell(row, field, text, { prefix = 'spendbook-cell' } = {}) {
     const cell = document.createElement('td');
-    cell.className = `spendbook-cell-${field}`;
+    cell.className = `${prefix}-${field}`;
     cell.textContent = text;
     row.append(cell);
     return cell;

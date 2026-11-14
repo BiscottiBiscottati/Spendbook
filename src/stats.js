@@ -238,12 +238,24 @@ export function normalizeUsageArchive(value) {
             ? mergeUsageAccumulators(archive.byOrigin[known], counters)
             : normalizeUsageAccumulator(counters);
     }
-    for (const [key, entry] of Object.entries(value.byConfiguration ?? {})) {
+    for (const entry of Object.values(value.byConfiguration ?? {})) {
         if (!entry || typeof entry !== 'object') continue;
-        archive.byConfiguration[key] = {
-            configuration: typeof entry.configuration === 'string' ? entry.configuration : null,
-            accumulator: normalizeUsageAccumulator(entry.accumulator),
-        };
+        const configuration = normalizeConfigurationLabel(entry.configuration);
+        const key = configuration ?? DEFAULT_CONFIGURATION_LABEL;
+        // A persisted label goes through the one normaliser, and two entries
+        // that describe one group once normalized are merged rather than one
+        // silently overwriting the other.
+        if (!archive.byConfiguration[key]) {
+            archive.byConfiguration[key] = {
+                configuration,
+                accumulator: normalizeUsageAccumulator(entry.accumulator),
+            };
+            continue;
+        }
+        archive.byConfiguration[key].accumulator = mergeUsageAccumulators(
+            archive.byConfiguration[key].accumulator,
+            entry.accumulator,
+        );
     }
     for (const entry of Object.values(value.byModel ?? {})) {
         if (!entry || typeof entry !== 'object') continue;
@@ -387,9 +399,15 @@ export function sumUsageRecords({ records = [], archive = null, prices = null } 
         // name, so its dollars stay in the overall total rather than being
         // attributed to a guess.
         if (bucket.origin) targets.push(summaryFor(byOrigin, bucket.origin));
-        // A row folded without a configuration is a `default` row: that group
-        // is a real one, so its dollars belong there.
-        targets.push(configurationSummaryFor(byConfiguration, bucket.configuration));
+        // A folded row's dollars can join a configuration group only when the
+        // archive also carries that group's counters: a bucket from an archive
+        // written before labels existed has none, and its dollars stay in the
+        // overall total rather than inventing a group with a cost and no
+        // requests.
+        const configurationKey = bucket.configuration ?? DEFAULT_CONFIGURATION_LABEL;
+        if (folded.byConfiguration[configurationKey]) {
+            targets.push(configurationSummaryFor(byConfiguration, bucket.configuration));
+        }
         addFoldedDollars(bucket, prices, targets);
     }
 

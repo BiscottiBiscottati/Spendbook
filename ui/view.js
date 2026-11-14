@@ -285,35 +285,22 @@ function buildConfigurationGroups(usage, prices) {
     const groups = Object.entries(usage.byConfiguration ?? {}).map(([key, group]) => {
         const counters = group.counters;
         const requests = toCount(counters.requests);
-        const excluded = toCount(counters.excludedRequests);
         const measuredPrompt = toCount(counters.promptTokens);
         const estimatedPrompt = toCount(counters.estimatedPromptTokens);
         const knownPrompt = measuredPrompt + estimatedPrompt;
-        const rate = hitRateFor(counters);
+        const { requestsLabel, detailLabel } = describeRequests(counters);
         const cost = describeDollars(group.cost, prices?.currency);
 
         return {
             key,
             label: group.configuration ?? DEFAULT_CONFIGURATION_LABEL,
             isDefault: group.configuration === null,
-            // A group with only failed rows says so instead of reading as an
-            // empty configuration.
-            requestsLabel: requests > 0
-                ? formatCountLabel(requests, 'completed request')
-                : formatCountLabel(excluded, 'failed or stopped request'),
-            detailLabel: requests > 0 && excluded > 0
-                ? formatCountLabel(excluded, 'failed or stopped request')
-                : '',
+            requestsLabel,
+            detailLabel,
             metrics: [
                 promptMetric(counters, { measuredPrompt, estimatedPrompt }),
                 tokenMetric('completion', 'Completion', counters.completionTokens, counters.completionTokenRequests),
-                {
-                    key: 'hitRate',
-                    label: 'Hit rate',
-                    value: formatPercent(rate),
-                    source: rate == null ? 'unavailable' : 'measured',
-                    note: ratedNote(counters, knownPrompt),
-                },
+                hitRateMetric(counters, knownPrompt),
                 dollarsMetric('cost', 'Cost', group.cost, requests, cost),
             ],
         };
@@ -361,6 +348,49 @@ function buildCards(usage, prices, { filtered = false } = {}) {
 }
 
 /**
+ * The request counts of one summary as labels: what completed, and the failures
+ * beside it. A group with only failed rows reports those rather than reading as
+ * an empty configuration, and the same words are used by a card and by a
+ * comparison row.
+ *
+ * @param {object} counters
+ * @returns {{requests: number, excluded: number, requestsLabel: string, detailLabel: string}}
+ */
+function describeRequests(counters) {
+    const requests = toCount(counters.requests);
+    const excluded = toCount(counters.excludedRequests);
+    return {
+        requests,
+        excluded,
+        requestsLabel: requests > 0
+            ? formatCountLabel(requests, 'completed request')
+            : formatCountLabel(excluded, 'failed or stopped request'),
+        detailLabel: requests > 0 && excluded > 0
+            ? formatCountLabel(excluded, 'failed or stopped request')
+            : '',
+    };
+}
+
+/**
+ * The cache-hit metric, shared by a card and a comparison row so the two
+ * surfaces cannot describe the same rate differently.
+ *
+ * @param {object} counters
+ * @param {number} knownPrompt Reported plus estimated prompt tokens
+ * @returns {object}
+ */
+function hitRateMetric(counters, knownPrompt) {
+    const rate = hitRateFor(counters);
+    return {
+        key: 'hitRate',
+        label: 'Hit rate',
+        value: formatPercent(rate),
+        source: rate == null ? 'unavailable' : 'measured',
+        note: ratedNote(counters, knownPrompt),
+    };
+}
+
+/**
  * One card. Every metric carries the source of its number, so an unavailable
  * figure is drawn as a placeholder and a reader is never handed a confident
  * zero the provider never sent.
@@ -374,28 +404,22 @@ function buildCards(usage, prices, { filtered = false } = {}) {
 function buildCard(scope, summary, prices, { filtered = false } = {}) {
     const counters = summary.counters;
     const requests = toCount(counters.requests);
-    const excluded = toCount(counters.excludedRequests);
     const measuredPrompt = toCount(counters.promptTokens);
     const estimatedPrompt = toCount(counters.estimatedPromptTokens);
     const knownPrompt = measuredPrompt + estimatedPrompt;
     const currency = prices?.currency;
-    const rate = hitRateFor(counters);
     const coverage = coverageFor(counters);
     const cost = describeDollars(summary.cost, currency);
     const saving = describeDollars(summary.saving, currency);
-
     // A chat with no completed request has only failures to report, so its
     // header carries them instead of claiming zero completed requests.
-    const head = requests > 0
-        ? formatCountLabel(requests, 'completed request')
-        : formatCountLabel(excluded, 'failed or stopped request');
-    const stopped = requests > 0 && excluded > 0 ? formatCountLabel(excluded, 'failed or stopped request') : '';
+    const { requestsLabel, detailLabel } = describeRequests(counters);
 
     return {
         scope,
         title: scope === 'all' ? (filtered ? 'This run' : 'This chat') : ORIGIN_CARD_TITLES[scope],
-        requestsLabel: head,
-        detailLabel: stopped,
+        requestsLabel,
+        detailLabel,
         // A card with no money says why: a metric showing a placeholder leaves
         // the reader to guess whether the table or the provider is at fault. A
         // chat with no completed request has no cost to explain.
@@ -403,13 +427,7 @@ function buildCard(scope, summary, prices, { filtered = false } = {}) {
         metrics: [
             promptMetric(counters, { measuredPrompt, estimatedPrompt }),
             tokenMetric('cached', 'Cached', counters.hitTokens, counters.ratedRequests),
-            {
-                key: 'hitRate',
-                label: 'Hit rate',
-                value: formatPercent(rate),
-                source: rate == null ? 'unavailable' : 'measured',
-                note: ratedNote(counters, knownPrompt),
-            },
+            hitRateMetric(counters, knownPrompt),
             tokenMetric('completion', 'Completion', counters.completionTokens, counters.completionTokenRequests),
             tokenMetric('total', 'Total tokens', counters.totalTokens, counters.totalTokenRequests),
             {
@@ -559,7 +577,9 @@ function describeDollars(figures, currency) {
  * @returns {string}
  */
 function describeDollarCoverage(figures, requests) {
-    if (figures.requests >= requests) return '';
+    // A figure that covers no request is already drawn as a placeholder, so it
+    // must not also carry "for 0 of n requests" — the value says it all.
+    if (figures.requests === 0 || figures.requests >= requests) return '';
     return `for ${formatCount(figures.requests)} of ${formatCount(requests)} requests`;
 }
 

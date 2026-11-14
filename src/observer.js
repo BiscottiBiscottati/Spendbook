@@ -14,10 +14,7 @@
  */
 
 import { createUsageId } from './ids.js';
-import {
-    getConfigurationLabel as readPageConfigurationLabel,
-    normalizeConfigurationLabel,
-} from './configuration.js';
+import { normalizeConfigurationLabel } from './configuration.js';
 import { resolveUsageOrigin, USAGE_ORIGINS } from './origin.js';
 import { createPromptFingerprint } from './prefix.js';
 
@@ -63,7 +60,7 @@ export function installUsageObserver({
     isEnabled = () => false,
     getChatId = () => null,
     getRunId = () => null,
-    getConfigurationLabel = readPageConfigurationLabel,
+    getConfigurationLabel = () => null,
     handleRecord = () => {},
     estimatePromptTokens = null,
     estimateMessageTokens = null,
@@ -112,7 +109,7 @@ export function installUsageObserver({
         const runId = readIdentifier(sink, 'getRunId');
         // Same rule for the configuration label: a host that changes it while
         // the request is in flight must not move this row into the new group.
-        const configuration = readConfigurationLabel(sink);
+        const configuration = readIdentifier(sink, 'getConfigurationLabel');
 
         // The capture context is built once; only the response-specific
         // fields differ between the paths.
@@ -221,13 +218,6 @@ function readIdentifier(sink, getter) {
     }
 }
 
-function readConfigurationLabel(sink) {
-    try {
-        return sink?.getConfigurationLabel?.() ?? null;
-    } catch {
-        return null;
-    }
-}
 
 /**
  * Attribution is read through the sink so the wrapper installed by an earlier

@@ -868,3 +868,40 @@ describe('Spendbook drawer — configuration comparison', () => {
             .toMatch(/Configuration: the label a host extension set/);
     });
 });
+
+describe('Spendbook drawer — configuration row sources', () => {
+    beforeEach(() => {
+        document.body.innerHTML = '';
+    });
+
+    it('marks a comparison figure estimated or unavailable, never as measured', () => {
+        const { container } = mount({
+            settings: { trackingEnabled: true },
+            getSnapshot: () => ({
+                records: [row({
+                    configuration: 'batch-8',
+                    usageSource: 'estimated',
+                    promptTokens: null,
+                    estimatedPromptTokens: 900,
+                    hitTokens: null,
+                    completionTokens: 100,
+                    cacheWriteTokens: null,
+                    reasoningTokens: null,
+                    totalTokens: null,
+                })],
+                trackingEnabled: true,
+                health: { captured: 1 },
+            }),
+        });
+
+        const [configRow] = container.querySelectorAll('.spendbook-configuration-rows tr');
+        const promptCell = configRow.querySelector('.spendbook-configuration-cell-prompt');
+        expect(promptCell.textContent).toBe('~900');
+        expect(promptCell.dataset.source).toBe('estimated');
+
+        // No price row matches, so the cost is unavailable rather than zero.
+        const costCell = configRow.querySelector('.spendbook-configuration-cell-cost');
+        expect(costCell.textContent).toBe('—');
+        expect(costCell.dataset.source).toBe('unavailable');
+    });
+});
