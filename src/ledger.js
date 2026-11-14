@@ -24,14 +24,29 @@
  * record carries the id of the run that was open when its request was sent, so a
  * run can be looked at on its own; a record sent before the first run carries
  * none and belongs to "all runs".
+ *
+ * Prefix diagnostics keep one prompt fingerprint per provider, model and origin,
+ * so an interleaved quiet or internal call cannot displace the story baseline.
+ * The fingerprint never becomes part of a record: the observer hands it beside
+ * the row, the ledger consumes it, and only the baseline map is persisted while
+ * the row keeps the shared-prefix count and the breaker flag.
  */
 
 import { createUsageId } from './ids.js';
+import {
+    comparePromptFingerprints,
+    isPossiblePrefixBreaker,
+    mergePromptFingerprints,
+    normalizePromptFingerprint,
+    normalizePromptFingerprints,
+    promptFingerprintKey,
+} from './prefix.js';
 import {
     addRecordToUsageAccumulator,
     addRecordToUsageArchive,
     createUsageAccumulator,
     createUsageArchive,
+    isCompletedUsageRecord,
     isUsageAccumulatorEmpty,
     mergeUsageAccumulators,
     mergeUsageArchives,
@@ -108,12 +123,17 @@ export class UsageLedger {
      * metadata save is debounced.
      *
      * @param {object} record
+     * @param {object|null} [fingerprint] Transient prompt fingerprint the
+     *   observer hands beside the record. Consumed here and never stored: the
+     *   row keeps its shared-prefix count and its flag, the chat keeps the
+     *   baseline map.
      */
-    add(record) {
+    add(record, fingerprint = null) {
         if (!record || typeof record !== 'object') return;
         const chatId = record.chatId ?? null;
         const state = this.#ensureState(chatId);
 
+        this.#applyPrefixDiagnostics(state, record, fingerprint);
         state.records.push(record);
         state.revision += 1;
         this.#evictOverflow(state);
@@ -263,7 +283,7 @@ export class UsageLedger {
         const existing = this.#byChat.get(key);
         let adoptedOutside = false;
         if (pendingAuthoritative && pending.revision >= (existing?.revision ?? 0)) {
-            this.#byChat.set(key, { ...stateFromNamespace(pending), ownerChatId: chatId });
+            this.#byChat.set(key, this.#adoptState(pending, chatId, existing));
             adoptedOutside = true;
         } else if (renamedFrom) {
             const adopted = { ...stateFromNamespace(persisted), ownerChatId: chatId };
@@ -271,11 +291,17 @@ export class UsageLedger {
             else this.#byChat.set(key, adopted);
             adoptedOutside = true;
         } else if (persistedOwned && (!existing || persisted.revision > existing.revision)) {
-            this.#byChat.set(key, { ...stateFromNamespace(persisted), ownerChatId: chatId });
+            this.#byChat.set(key, this.#adoptState(persisted, chatId, existing));
         } else if (persistedOwned && existing.revision > persisted.revision
             && this.#isActiveChat(chatId) && metadata) {
             // A record that landed for this chat while another one was open is
-            // newer than the file, so write it through on the first open.
+            // newer than the file, so write it through on the first open — after
+            // keeping any baseline only the file knew, the same way an adoption
+            // keeps one only this page knew.
+            existing.promptFingerprints = mergePromptFingerprints(
+                existing.promptFingerprints,
+                persisted.promptFingerprints,
+            );
             this.#writeNamespace(existing);
             this.#scheduleSave(chatId);
         } else if (!persistedOwned) {
@@ -401,7 +427,7 @@ export class UsageLedger {
         let state = this.#byChat.get(newKey);
         const adoptedPending = movedPending ? normalizeNamespace(movedPending) : null;
         if (adoptedPending && adoptedPending.revision >= (state?.revision ?? 0)) {
-            state = { ...stateFromNamespace(adoptedPending), ownerChatId: newId };
+            state = this.#adoptState(adoptedPending, newId, state);
             this.#byChat.set(newKey, state);
         }
         if (!state) return;
@@ -464,6 +490,26 @@ export class UsageLedger {
         this.#persistAllTime();
     }
 
+    /**
+     * Adopts a stored state for one chat. The chat file's baseline is in force
+     * where it knows a provider, model and origin; a baseline the ledger already
+     * held for an identity the file does not describe is kept, so reopening a
+     * chat never loses a comparison this page has already made.
+     *
+     * @param {object} namespace Normalized namespace or pending snapshot.
+     * @param {string|null} chatId
+     * @param {object|undefined} existing State already held for this chat.
+     * @returns {object}
+     */
+    #adoptState(namespace, chatId, existing) {
+        const adopted = { ...stateFromNamespace(namespace), ownerChatId: chatId };
+        adopted.promptFingerprints = mergePromptFingerprints(
+            adopted.promptFingerprints,
+            existing?.promptFingerprints,
+        );
+        return adopted;
+    }
+
     #ensureState(chatId) {
         const key = chatKey(chatId);
         if (!this.#byChat.has(key)) this.loadChat(chatId);
@@ -508,6 +554,42 @@ export class UsageLedger {
         state.revision = previousRevision + 1;
         this.#pendingBackup.chats[key] = serializeState(state);
         this.#persistPendingBackup();
+    }
+
+    /**
+     * Decides one record's prefix diagnostics before it is stored. The ledger
+     * owns the per-chat baselines, so the comparison happens here: the record is
+     * compared with the baseline of its provider, model and origin, and a
+     * completed request replaces that baseline even when its token counts were
+     * unavailable (the next request supplies its own counts for the sum). A
+     * failed or aborted request can still show what it shared, but never moves a
+     * baseline and is never flagged — a cancelled request is not a cache miss.
+     *
+     * @param {object} state
+     * @param {object} record
+     * @param {object|null} raw The observer's fingerprint for this request.
+     */
+    #applyPrefixDiagnostics(state, record, raw) {
+        // The observer's own fingerprint is already normalized; this guards the
+        // ledger's boundary instead, where a test or a host can hand anything.
+        const fingerprint = normalizePromptFingerprint(raw);
+        const completed = isCompletedUsageRecord(record);
+
+        record.sharedPrefixTokens = null;
+        record.possiblePrefixBreaker = false;
+        if (!fingerprint) return;
+
+        const key = promptFingerprintKey(fingerprint);
+        record.sharedPrefixTokens = comparePromptFingerprints(
+            state.promptFingerprints[key] ?? null,
+            fingerprint,
+        );
+        record.possiblePrefixBreaker = completed && isPossiblePrefixBreaker({
+            sharedPrefixTokens: record.sharedPrefixTokens,
+            hitTokens: record.hitTokens,
+        });
+
+        if (completed) state.promptFingerprints[key] = fingerprint;
     }
 
     #evictOverflow(state) {
@@ -619,9 +701,9 @@ export class UsageLedger {
     }
 
     /**
-     * Folds one chat state into another: rows, folded counters and runs. The
-     * current run is the later-started of the two, because starting a run is the
-     * only thing that ever changes it.
+     * Folds one chat state into another: rows, folded counters, runs and the
+     * prefix baselines. The current run is the later-started of the two, because
+     * starting a run is the only thing that ever changes it.
      *
      * @param {object} target
      * @param {object} source
@@ -631,6 +713,7 @@ export class UsageLedger {
         target.archived = mergeUsageArchives(target.archived, source.archived);
         target.runs = mergeRuns(target.runs, source.runs);
         target.currentRunId = mergeCurrentRunId(target.currentRunId, source.currentRunId, target.runs);
+        target.promptFingerprints = mergePromptFingerprints(target.promptFingerprints, source.promptFingerprints);
     }
 
     #rememberRename(oldId, newId) {
@@ -734,6 +817,7 @@ function createChatState(chatId) {
         archived: createUsageArchive(),
         runs: [],
         currentRunId: null,
+        promptFingerprints: {},
         revision: 0,
     };
 }
@@ -746,6 +830,7 @@ function stateFromNamespace(namespace) {
         archived: normalizeUsageArchive(namespace?.archived),
         runs,
         currentRunId: normalizeCurrentRunId(namespace?.currentRunId, runs),
+        promptFingerprints: normalizePromptFingerprints(namespace?.promptFingerprints),
         revision: Number.isFinite(namespace?.revision) ? namespace.revision : 0,
     };
 }
@@ -759,6 +844,7 @@ function serializeState(state) {
         archived: normalizeUsageArchive(state.archived),
         runs: (state.runs ?? []).map((run) => ({ ...run })),
         currentRunId: state.currentRunId ?? null,
+        promptFingerprints: normalizePromptFingerprints(state.promptFingerprints),
     };
 }
 
@@ -773,6 +859,7 @@ function normalizeNamespace(raw) {
         archived: normalizeUsageArchive(raw.archived),
         runs,
         currentRunId: normalizeCurrentRunId(raw.currentRunId, runs),
+        promptFingerprints: normalizePromptFingerprints(raw.promptFingerprints),
     };
 }
 

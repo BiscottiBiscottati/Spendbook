@@ -13,16 +13,26 @@ function jsonResponse(payload, { status = 200 } = {}) {
     });
 }
 
-function requestInit({ model = 'model-a', source = 'openai', stream = false } = {}) {
+function requestInit({
+    model = 'model-a',
+    source = 'openai',
+    stream = false,
+    messages = [{ role: 'user', content: 'hello' }],
+} = {}) {
     return {
         method: 'POST',
-        body: JSON.stringify({
-            chat_completion_source: source,
-            model,
-            stream,
-            messages: [{ role: 'user', content: 'hello' }],
-        }),
+        body: JSON.stringify({ chat_completion_source: source, model, stream, messages }),
     };
+}
+
+/**
+ * A per-message estimator that counts a message by its text length, so an
+ * expected shared-prefix sum is a literal a reader can check by eye.
+ */
+function lengthEstimator(perCharacter = 100) {
+    return async (messages) => messages.map((message) => (
+        typeof message.content === 'string' ? message.content.length * perCharacter : 0
+    ));
 }
 
 function sseResponse(parts, { status = 200, contentType = 'text/event-stream' } = {}) {
@@ -79,7 +89,7 @@ function createPipeline({ enabled = true, observerOptions = {}, responseGate = n
         isEnabled: () => enabledNow,
         getChatId: () => chatId,
         getRunId: () => ledger.currentRunIdFor(chatId),
-        handleRecord: (record) => ledger.add(record),
+        handleRecord: (record, fingerprint) => ledger.add(record, fingerprint),
         ...observerOptions,
     });
 
@@ -794,5 +804,95 @@ describe('Spendbook observer — provider-reported usage fields', () => {
             cost: 0.005,
             cacheDiscount: 0.002,
         });
+    });
+});
+
+describe('Spendbook observer pipeline — prefix diagnostics', () => {
+    it('records what a request shared with the previous comparable request', async () => {
+        const pipeline = createPipeline({ observerOptions: { estimateMessageTokens: lengthEstimator() } });
+        noteGenerationStarted('normal');
+
+        await send(pipeline, requestInit({ messages: [{ role: 'user', content: 'a' }] }));
+        await waitForRecords(pipeline, 1);
+        await send(pipeline, requestInit({
+            messages: [{ role: 'user', content: 'a' }, { role: 'assistant', content: 'bb' }],
+        }));
+        await waitForRecords(pipeline, 2);
+
+        const [next, first] = pipeline.records();
+        expect(first.sharedPrefixTokens).toBeNull();
+        // 100 for the shared 'a'; the reply is not part of the shared prefix.
+        expect(next.sharedPrefixTokens).toBe(100);
+        expect(next.possiblePrefixBreaker).toBe(false);
+    });
+
+    it('keeps no prompt text in the namespace', async () => {
+        const pipeline = createPipeline({ observerOptions: { estimateMessageTokens: lengthEstimator() } });
+        noteGenerationStarted('normal');
+
+        await send(pipeline, requestInit({ messages: [{ role: 'system', content: 'SECRET SYSTEM PROMPT' }] }));
+        await waitForRecords(pipeline, 1);
+        pipeline.ledger.flush();
+
+        expect(JSON.stringify(pipeline.metadata)).not.toContain('SECRET SYSTEM PROMPT');
+    });
+
+    it('flags a zero-hit request that shares a long prefix', async () => {
+        const pipeline = createPipeline({ observerOptions: { estimateMessageTokens: lengthEstimator(3000) } });
+        pipeline.setResponse(jsonResponse({
+            id: 'resp-2',
+            model: 'model-a',
+            usage: {
+                prompt_tokens: 3000,
+                completion_tokens: 5,
+                total_tokens: 3005,
+                prompt_cache_hit_tokens: 0,
+            },
+        }));
+        noteGenerationStarted('normal');
+
+        await send(pipeline, requestInit({ messages: [{ role: 'user', content: 'a' }] }));
+        await waitForRecords(pipeline, 1);
+        await send(pipeline, requestInit({
+            messages: [{ role: 'user', content: 'a' }, { role: 'assistant', content: 'b' }],
+        }));
+        await waitForRecords(pipeline, 2);
+
+        const [next] = pipeline.records();
+        expect(next.sharedPrefixTokens).toBe(3000);
+        expect(next.hitTokens).toBe(0);
+        expect(next.possiblePrefixBreaker).toBe(true);
+    });
+
+    it('compares a story request with the previous story request across an interleaved internal call', async () => {
+        const pipeline = createPipeline({ observerOptions: { estimateMessageTokens: lengthEstimator() } });
+        noteGenerationStarted('normal');
+
+        await send(pipeline, requestInit({ messages: [{ role: 'user', content: 'a' }] }));
+        await waitForRecords(pipeline, 1);
+
+        // An extension's own call in between: internal, and it must not become
+        // the baseline the next story request is compared with.
+        const internalInit = markInternalRequest(requestInit({
+            source: 'workers-ai',
+            messages: [{ role: 'user', content: 'zzzz' }],
+        }), 'summarizer');
+        await send(pipeline, internalInit);
+        await waitForRecords(pipeline, 2);
+
+        await send(pipeline, requestInit({
+            messages: [{ role: 'user', content: 'a' }, { role: 'assistant', content: 'bb' }],
+        }));
+        await waitForRecords(pipeline, 3);
+
+        const [story, internal] = pipeline.records();
+        expect(internal).toMatchObject({
+            origin: 'internal',
+            label: 'summarizer',
+            sharedPrefixTokens: null,
+            possiblePrefixBreaker: false,
+        });
+        // 100 for 'a' against the story baseline, not against the internal one.
+        expect(story).toMatchObject({ origin: 'story', sharedPrefixTokens: 100 });
     });
 });

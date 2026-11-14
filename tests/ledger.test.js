@@ -21,6 +21,9 @@ function record(overrides = {}) {
         model: 'model-a',
         status: 'ok',
         usageSource: 'measured',
+        // Every stored row carries the prefix diagnostics, decided on add.
+        sharedPrefixTokens: null,
+        possiblePrefixBreaker: false,
         promptTokens: 10,
         hitTokens: 4,
         completionTokens: 4,
@@ -908,5 +911,341 @@ describe('Spendbook ledger — measurement runs', () => {
             runs: [{ runId: 'run-1', label: 'kept', startedAt: 2 }],
             currentRunId: null,
         });
+    });
+});
+
+/**
+ * A fingerprint as the observer hands it over beside the record: hashes and
+ * per-message token counts. The ledger consumes it and stores only the
+ * per-identity baseline.
+ */
+function fingerprint(overrides = {}) {
+    return {
+        provider: 'deepseek',
+        model: 'deepseek-flash',
+        origin: 'story',
+        messages: [
+            { hash: 11, tokens: 1500 },
+            { hash: 22, tokens: 600 },
+        ],
+        ...overrides,
+    };
+}
+
+function fingerprintWithReply(overrides = {}) {
+    return fingerprint({
+        messages: [
+            { hash: 11, tokens: 1500 },
+            { hash: 22, tokens: 600 },
+            { hash: 33, tokens: 30 },
+        ],
+        ...overrides,
+    });
+}
+
+/** Adds one row the way the observer does: the record, and its fingerprint beside it. */
+function addWithFingerprint(ledger, overrides, print) {
+    const entry = record(overrides);
+    ledger.add(entry, print);
+    return entry;
+}
+
+function persistedFingerprints(harness) {
+    return Object.values(harness.state.metadata[USAGE_CHAT_METADATA_KEY]?.promptFingerprints ?? {});
+}
+
+describe('Spendbook ledger — prefix diagnostics', () => {
+    it('compares a row with its comparable predecessor and flags a long zero-hit prefix', () => {
+        const harness = createHarness();
+        harness.ledger.loadChat('chat-a');
+
+        addWithFingerprint(harness.ledger, { recordId: 'r-1', hitTokens: 1 }, fingerprint());
+        const next = addWithFingerprint(harness.ledger, { recordId: 'r-2', hitTokens: 0 }, fingerprintWithReply());
+
+        // 1500 + 600 from the matched messages; the reply is not shared.
+        expect(next.sharedPrefixTokens).toBe(2100);
+        expect(next.possiblePrefixBreaker).toBe(true);
+        expect(harness.ledger.recordsFor('chat-a')[1].sharedPrefixTokens).toBeNull();
+    });
+
+    it('carries the baseline across a reload so the next request still compares', () => {
+        const harness = createHarness();
+        harness.ledger.loadChat('chat-a');
+        addWithFingerprint(harness.ledger, { recordId: 'r-1', hitTokens: 1 }, fingerprint());
+        harness.ledger.flush();
+
+        const reloaded = harness.createLedger();
+        reloaded.loadChat('chat-a');
+        const next = addWithFingerprint(reloaded, { recordId: 'r-2', hitTokens: 0 }, fingerprintWithReply());
+
+        expect(next.sharedPrefixTokens).toBe(2100);
+        expect(next.possiblePrefixBreaker).toBe(true);
+        // One baseline per identity — not one per row — replaced by the latest
+        // comparable prompt: hashes and counts only, never the text.
+        const persisted = persistedFingerprints(harness);
+        expect(persisted).toHaveLength(1);
+        expect(persisted[0].messages).toHaveLength(3);
+        expect(persisted[0].messages.every((message) => !('content' in message))).toBe(true);
+    });
+
+    it('flags at exactly 2,048 shared tokens and not at 2,047', () => {
+        const harness = createHarness();
+        harness.ledger.loadChat('chat-a');
+        addWithFingerprint(harness.ledger, { recordId: 'r-1' }, fingerprint({
+            messages: [{ hash: 11, tokens: 1500 }, { hash: 22, tokens: 548 }],
+        }));
+
+        const exactly = addWithFingerprint(harness.ledger, { recordId: 'r-2', hitTokens: 0 }, fingerprint({
+            messages: [{ hash: 11, tokens: 1500 }, { hash: 22, tokens: 548 }, { hash: 33, tokens: 100 }],
+        }));
+        expect(exactly.sharedPrefixTokens).toBe(2048);
+        expect(exactly.possiblePrefixBreaker).toBe(true);
+
+        const below = addWithFingerprint(harness.ledger, { recordId: 'r-3', hitTokens: 0 }, fingerprint({
+            messages: [{ hash: 11, tokens: 1500 }, { hash: 22, tokens: 547 }, { hash: 44, tokens: 100 }],
+        }));
+        expect(below.sharedPrefixTokens).toBe(2047);
+        expect(below.possiblePrefixBreaker).toBe(false);
+    });
+
+    it('compares each origin against its own baseline, so an interleaved call cannot hide a break', () => {
+        const harness = createHarness();
+        harness.ledger.loadChat('chat-a');
+        addWithFingerprint(harness.ledger, { recordId: 'r-1', hitTokens: 1 }, fingerprint());
+
+        const quiet = addWithFingerprint(harness.ledger, {
+            recordId: 'r-2',
+            origin: 'quiet',
+            hitTokens: 0,
+        }, fingerprint({
+            origin: 'quiet',
+            messages: [{ hash: 91, tokens: 5000 }],
+        }));
+        // The quiet call has its own baseline, so it shares nothing with the
+        // story prompt even though that one is on screen.
+        expect(quiet.sharedPrefixTokens).toBeNull();
+        expect(quiet.possiblePrefixBreaker).toBe(false);
+
+        const story = addWithFingerprint(harness.ledger, { recordId: 'r-3', hitTokens: 0 }, fingerprintWithReply());
+        expect(story.sharedPrefixTokens).toBe(2100);
+        expect(story.possiblePrefixBreaker).toBe(true);
+    });
+
+    it('keeps a separate baseline per provider and model', () => {
+        const harness = createHarness();
+        harness.ledger.loadChat('chat-a');
+        addWithFingerprint(harness.ledger, { recordId: 'r-1', hitTokens: 1 }, fingerprint());
+
+        const switched = addWithFingerprint(harness.ledger, {
+            recordId: 'r-2',
+            provider: 'openrouter',
+            model: 'deepseek/deepseek-v3',
+            hitTokens: 0,
+        }, fingerprintWithReply({ provider: 'openrouter', model: 'deepseek/deepseek-v3' }));
+        expect(switched.sharedPrefixTokens).toBeNull();
+
+        const next = addWithFingerprint(harness.ledger, {
+            recordId: 'r-3',
+            provider: 'openrouter',
+            model: 'deepseek/deepseek-v3',
+            hitTokens: 0,
+        }, fingerprintWithReply({ provider: 'openrouter', model: 'deepseek/deepseek-v3' }));
+        // The switched request's own prompt is now the openrouter baseline,
+        // reply included: this row shares all three of its messages.
+        expect(next.sharedPrefixTokens).toBe(2130);
+    });
+
+    it('shows what a failed request shared without flagging it or moving the baseline', () => {
+        const harness = createHarness();
+        harness.ledger.loadChat('chat-a');
+        addWithFingerprint(harness.ledger, { recordId: 'r-1', hitTokens: 1 }, fingerprint());
+
+        const failed = addWithFingerprint(harness.ledger, {
+            recordId: 'r-2',
+            status: 'error',
+            hitTokens: 0,
+        }, fingerprintWithReply());
+        expect(failed.sharedPrefixTokens).toBe(2100);
+        expect(failed.possiblePrefixBreaker).toBe(false);
+
+        const next = addWithFingerprint(harness.ledger, { recordId: 'r-3', hitTokens: 0 }, fingerprintWithReply());
+        expect(next.sharedPrefixTokens).toBe(2100);
+        expect(next.possiblePrefixBreaker).toBe(true);
+    });
+
+    it('drops the baselines with the chat’s state', () => {
+        const harness = createHarness();
+        harness.ledger.loadChat('chat-a');
+        addWithFingerprint(harness.ledger, { recordId: 'r-1' }, fingerprint());
+
+        harness.ledger.resetChat('chat-a');
+
+        const next = addWithFingerprint(harness.ledger, { recordId: 'r-2', hitTokens: 0 }, fingerprintWithReply());
+        expect(next.sharedPrefixTokens).toBeNull();
+        expect(persistedFingerprints(harness)).toHaveLength(1);
+    });
+
+    it('moves the baselines with a renamed chat', async () => {
+        const harness = createHarness({ chatId: 'chat-b' });
+        addWithFingerprint(harness.ledger, { recordId: 'r-1' }, fingerprint());
+
+        await harness.ledger.handleChatRenamed('chat-a', 'chat-renamed');
+
+        const next = addWithFingerprint(harness.ledger, {
+            recordId: 'r-2',
+            chatId: 'chat-renamed',
+            hitTokens: 0,
+        }, fingerprintWithReply());
+        expect(next.sharedPrefixTokens).toBe(2100);
+        expect(next.possiblePrefixBreaker).toBe(true);
+    });
+
+    it('keeps both chats’ baselines when a rename merges two live chats', async () => {
+        const harness = createHarness({ chatId: 'chat-c' });
+        const routed = { provider: 'openrouter', model: 'deepseek/deepseek-v3' };
+        // The chat being renamed into chat-b has a baseline for its own route.
+        addWithFingerprint(harness.ledger, { chatId: 'chat-a', recordId: 'r-a', ...routed }, fingerprint(routed));
+        // chat-b holds the baseline of the chat it is.
+        addWithFingerprint(harness.ledger, { chatId: 'chat-b', recordId: 'r-b' }, fingerprint());
+
+        await harness.ledger.handleChatRenamed('chat-a', 'chat-b');
+
+        // The merged map keeps one baseline per identity, from both sides.
+        const local = addWithFingerprint(harness.ledger, { chatId: 'chat-b', recordId: 'r-c', hitTokens: 0 }, fingerprintWithReply());
+        expect(local.sharedPrefixTokens).toBe(2100);
+
+        const moved = addWithFingerprint(harness.ledger, { chatId: 'chat-b', recordId: 'r-d', ...routed }, fingerprint({
+            ...routed,
+            messages: [{ hash: 11, tokens: 1500 }, { hash: 22, tokens: 600 }, { hash: 33, tokens: 30 }],
+        }));
+        expect(moved.sharedPrefixTokens).toBe(2100);
+    });
+
+    it('keeps a baseline the chat file does not describe when the chat is reopened', () => {
+        const harness = createHarness();
+        harness.ledger.loadChat('chat-a');
+        const routed = { provider: 'openrouter', model: 'deepseek/deepseek-v3' };
+        addWithFingerprint(harness.ledger, { recordId: 'r-1', ...routed }, fingerprint(routed));
+
+        // The file moved on elsewhere (another tab, a later save) and knows only
+        // the chat's own provider.
+        const namespace = harness.state.metadata[USAGE_CHAT_METADATA_KEY];
+        harness.state.metadata[USAGE_CHAT_METADATA_KEY] = {
+            ...namespace,
+            revision: namespace.revision + 5,
+            promptFingerprints: { '["deepseek","deepseek-flash","story"]': fingerprint() },
+        };
+        harness.ledger.loadChat('chat-a');
+
+        // The file's baseline is in force...
+        const local = addWithFingerprint(harness.ledger, { recordId: 'r-2', hitTokens: 0 }, fingerprintWithReply());
+        expect(local.sharedPrefixTokens).toBe(2100);
+        // ...and the one the ledger held for the other route survived the load.
+        const moved = addWithFingerprint(harness.ledger, { recordId: 'r-3', ...routed }, fingerprint({
+            ...routed,
+            messages: [{ hash: 11, tokens: 1500 }, { hash: 22, tokens: 600 }, { hash: 33, tokens: 30 }],
+        }));
+        expect(moved.sharedPrefixTokens).toBe(2100);
+    });
+
+    it('wins the identity with the chat file when both sides know it', () => {
+        const harness = createHarness();
+        harness.ledger.loadChat('chat-a');
+        addWithFingerprint(harness.ledger, { recordId: 'r-1' }, fingerprint());
+
+        // The file knows the same identity with a different second message, at a
+        // newer revision.
+        const namespace = harness.state.metadata[USAGE_CHAT_METADATA_KEY];
+        harness.state.metadata[USAGE_CHAT_METADATA_KEY] = {
+            ...namespace,
+            revision: namespace.revision + 5,
+            promptFingerprints: {
+                '["deepseek","deepseek-flash","story"]': fingerprint({
+                    messages: [{ hash: 11, tokens: 1500 }, { hash: 99, tokens: 800 }],
+                }),
+            },
+        };
+        harness.ledger.loadChat('chat-a');
+
+        const next = addWithFingerprint(harness.ledger, { recordId: 'r-2', hitTokens: 0 }, fingerprintWithReply());
+        // The file's baseline is the one in force: only the first message matches.
+        expect(next.sharedPrefixTokens).toBe(1500);
+    });
+
+    it('keeps a baseline only the file knew when this page’s rows are newer', () => {
+        const harness = createHarness({ storage: null });
+        harness.ledger.loadChat('chat-a');
+        addWithFingerprint(harness.ledger, { recordId: 'r-1' }, fingerprint());
+
+        // The file is behind this page's rows, yet carries a route they never saw.
+        const routed = { provider: 'openrouter', model: 'deepseek/deepseek-v3' };
+        harness.state.metadata[USAGE_CHAT_METADATA_KEY] = {
+            version: 1,
+            ownerChatId: 'chat-a',
+            revision: 0,
+            records: [],
+            runs: [],
+            currentRunId: null,
+            promptFingerprints: { '["openrouter","deepseek/deepseek-v3","story"]': fingerprint(routed) },
+        };
+        harness.ledger.loadChat('chat-a');
+
+        // The page's rows and baseline were written through...
+        const local = addWithFingerprint(harness.ledger, { recordId: 'r-2', hitTokens: 0 }, fingerprintWithReply());
+        expect(local.sharedPrefixTokens).toBe(2100);
+        // ...and the file's other route kept its comparison.
+        const moved = addWithFingerprint(harness.ledger, { recordId: 'r-3', ...routed }, fingerprint({
+            ...routed,
+            messages: [{ hash: 11, tokens: 1500 }, { hash: 22, tokens: 600 }, { hash: 33, tokens: 30 }],
+        }));
+        expect(moved.sharedPrefixTokens).toBe(2100);
+    });
+
+    it('drops the baselines with a deleted chat', () => {
+        const harness = createHarness();
+        harness.ledger.loadChat('chat-a');
+        addWithFingerprint(harness.ledger, { recordId: 'r-1' }, fingerprint());
+
+        harness.ledger.handleChatDeleted('chat-a');
+
+        const next = addWithFingerprint(harness.ledger, { recordId: 'r-2', hitTokens: 0 }, fingerprintWithReply());
+        expect(next.sharedPrefixTokens).toBeNull();
+        expect(persistedFingerprints(harness)).toHaveLength(1);
+    });
+
+    it('drops text that reached a stored fingerprint', () => {
+        const harness = createHarness({
+            metadata: {
+                [USAGE_CHAT_METADATA_KEY]: {
+                    version: 1,
+                    ownerChatId: 'chat-a',
+                    revision: 3,
+                    records: [],
+                    runs: [],
+                    currentRunId: null,
+                    // A hand-edited map: a key that names nothing, and a message
+                    // that still carries the text it was hashed from.
+                    promptFingerprints: {
+                        'not-the-identity': {
+                            provider: 'deepseek',
+                            model: 'deepseek-flash',
+                            origin: 'story',
+                            messages: [
+                                { hash: 11, tokens: 1500, content: 'SECRET PROMPT TEXT' },
+                                { hash: 22, tokens: 600 },
+                            ],
+                        },
+                    },
+                },
+            },
+        });
+
+        harness.ledger.loadChat('chat-a');
+        const next = addWithFingerprint(harness.ledger, { recordId: 'r-2', hitTokens: 0 }, fingerprintWithReply());
+
+        // The key is rebuilt from the fingerprint, so the comparison still
+        // happens, and the text is dropped before the next write.
+        expect(next.sharedPrefixTokens).toBe(2100);
+        expect(JSON.stringify(harness.state.metadata)).not.toContain('SECRET PROMPT TEXT');
     });
 });

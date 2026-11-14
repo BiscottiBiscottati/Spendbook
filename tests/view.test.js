@@ -714,3 +714,56 @@ describe('Spendbook view — measurement runs', () => {
         expect(view.rows).toHaveLength(1);
     });
 });
+
+describe('Spendbook view — prefix diagnostics', () => {
+    it('shows the shared prefix as an estimate, marked with a tilde', () => {
+        const view = buildUsageView({
+            records: [record({ sharedPrefixTokens: 2200 })],
+            trackingEnabled: true,
+            prices: ACME_PRICES,
+        });
+
+        // The count comes from the tokenizer, never from the provider, so it is
+        // marked the way an estimated prompt is.
+        expect(view.rows[0].sharedPrefixLabel).toBe('~2,200');
+        expect(view.rows[0].prefixBreakerLabel).toBe('');
+    });
+
+    it('shows a placeholder when there is no comparable prior request', () => {
+        const view = buildUsageView({
+            records: [record({ sharedPrefixTokens: null })],
+            trackingEnabled: true,
+            prices: ACME_PRICES,
+        });
+
+        expect(view.rows[0].sharedPrefixLabel).toBe('—');
+        expect(view.rows[0].prefixBreakerLabel).toBe('');
+    });
+
+    it('names a suspected prefix breaker in words', () => {
+        const view = buildUsageView({
+            records: [record({
+                hitTokens: 0,
+                sharedPrefixTokens: 2200,
+                possiblePrefixBreaker: true,
+            })],
+            trackingEnabled: true,
+            prices: ACME_PRICES,
+        });
+
+        expect(view.rows[0].sharedPrefixLabel).toBe('~2,200');
+        expect(view.rows[0].prefixBreakerLabel).toBe('Possible prefix breaker');
+    });
+
+    it('does not flag a zero-hit row whose shared prefix is short', () => {
+        const view = buildUsageView({
+            // A row captured before the flag existed carries no field at all.
+            records: [record({ hitTokens: 0, sharedPrefixTokens: 780 })],
+            trackingEnabled: true,
+            prices: ACME_PRICES,
+        });
+
+        expect(view.rows[0].sharedPrefixLabel).toBe('~780');
+        expect(view.rows[0].prefixBreakerLabel).toBe('');
+    });
+});

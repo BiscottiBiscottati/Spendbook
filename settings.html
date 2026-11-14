@@ -43,6 +43,7 @@
                         <th>Completion</th>
                         <th>Cost</th>
                         <th>Saving</th>
+                        <th>Shared prefix</th>
                         <th>Latency</th>
                         <th>Status</th>
                         <th>Source</th>
@@ -108,6 +109,16 @@
                 <li>The hit rate is token-weighted: cached prompt tokens over the prompt tokens the provider
                     reported for those same requests, never an average of per-request percentages. A request
                     without both counts is left out of the ratio rather than counted as a miss.</li>
+                <li>Shared prefix: how many estimated tokens this request shared, from the start, with the
+                    previous comparable request &mdash; the same provider, model and origin, so a quiet or
+                    internal call in between cannot move the story baseline. The provider never reports
+                    this count; it is counted with SillyTavern's tokenizer and marked with a tilde, and a
+                    request with no comparable predecessor shows &mdash;.</li>
+                <li>Possible prefix breaker: the request shared at least 2,048 of those estimated tokens
+                    with its comparable predecessor yet reported zero cached tokens. Something before the
+                    cache boundary changed the prompt, or the provider dropped the cache; it is a
+                    suspicion, not a measurement of the cause. A request that reported no cache count at
+                    all is never flagged, and neither is a failed or stopped one.</li>
                 <li>Coverage: the share of prompt tokens the provider actually reported. An estimated prompt
                     counts as uncovered, so a provider that omits usage lowers coverage instead of
                     disappearing from it. A completed request that reported no prompt count at all caps

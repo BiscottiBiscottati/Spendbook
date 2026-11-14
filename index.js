@@ -12,7 +12,7 @@ import { extension_settings, getContext, renderExtensionTemplateAsync } from '..
 import { getSanitizedFilename } from '../../../utils.js';
 import { readSpendbookSettings, setPriceTable, setTrackingEnabled } from './src/settings.js';
 import { UsageLedger } from './src/ledger.js';
-import { createPromptTokenEstimator } from './src/estimator.js';
+import { createMessageTokenEstimator, createPromptTokenEstimator } from './src/estimator.js';
 import { getUsageObserverHealth, installUsageObserver } from './src/observer.js';
 import { noteGenerationEnded, noteGenerationStarted } from './src/origin.js';
 import { mountSpendbookPanel } from './ui/panel.js';
@@ -41,12 +41,13 @@ const ledger = new UsageLedger({
     sanitizeChatFileName: getSanitizedFilename,
 });
 
-// Prompt-token estimate for providers that omit usage. The tokenizer is
-// imported lazily, so an unavailable one leaves the row "unavailable" instead
-// of breaking the extension.
-const estimatePromptTokens = createPromptTokenEstimator({
-    loadTokenizer: () => import('../../../../scripts/tokenizers.js'),
-});
+// Prompt-token estimate for providers that omit usage, and the per-message
+// counts behind the prefix fingerprint. The tokenizer is imported lazily, so an
+// unavailable one leaves the row "unavailable" instead of breaking the
+// extension.
+const loadTokenizer = () => import('../../../../scripts/tokenizers.js');
+const estimatePromptTokens = createPromptTokenEstimator({ loadTokenizer });
+const estimateMessageTokens = createMessageTokenEstimator({ loadTokenizer });
 
 let refreshPanel = () => {};
 let generationStateBound = false;
@@ -79,7 +80,8 @@ function installObserver() {
         // request is in flight does not claim it.
         getRunId: () => ledger.currentRunIdFor(getChatId()),
         estimatePromptTokens,
-        handleRecord: (record) => ledger.add(record),
+        estimateMessageTokens,
+        handleRecord: (record, fingerprint) => ledger.add(record, fingerprint),
         // Refresh on settle, not on record: a skipped capture writes no record
         // but still changes the health line.
         onSettle: () => refreshPanel(),

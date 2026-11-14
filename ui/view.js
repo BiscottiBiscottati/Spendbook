@@ -542,10 +542,21 @@ export function describeObserverHealth({ trackingEnabled = false, health = null 
     };
 }
 
+/**
+ * One table row. The shared prefix is the tokenizer's estimate — the provider
+ * never reports it — so it carries the same tilde an estimated prompt does. The
+ * breaker flag is spelled out rather than drawn as an icon: a reader who does
+ * not know the rule still learns what the row suspects.
+ *
+ * @param {object} record
+ * @param {import('../src/prices.js').UsagePriceTable|null} prices
+ * @returns {object}
+ */
 function buildRow(record, prices) {
     const measuredPrompt = Number.isFinite(record.promptTokens) ? record.promptTokens : null;
     const estimatedPrompt = Number.isFinite(record.estimatedPromptTokens) ? record.estimatedPromptTokens : null;
     const prompt = measuredPrompt ?? estimatedPrompt;
+    const sharedPrefix = Number.isFinite(record.sharedPrefixTokens) ? record.sharedPrefixTokens : null;
     // A failed or aborted row never contributes to a total, so it must not
     // show a dollar figure the total ignores.
     const resolved = isCompletedUsageRecord(record)
@@ -566,6 +577,8 @@ function buildRow(record, prices) {
         completionLabel: formatCount(record.completionTokens),
         costLabel: formatCost(resolved.cost, currency, resolved.costSource),
         savingLabel: formatCost(resolved.saving, currency, resolved.savingSource),
+        sharedPrefixLabel: sharedPrefix == null ? PLACEHOLDER : `~${formatCount(sharedPrefix)}`,
+        prefixBreakerLabel: record.possiblePrefixBreaker ? 'Possible prefix breaker' : '',
         latencyLabel: formatLatency(record.latencyMs),
         statusLabel: STATUS_LABELS[record.status] ?? PLACEHOLDER,
         sourceLabel: SOURCE_LABELS[record.usageSource] ?? SOURCE_LABELS.unavailable,

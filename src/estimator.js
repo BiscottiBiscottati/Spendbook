@@ -1,10 +1,13 @@
 /**
- * Spendbook prompt-token estimator.
+ * Spendbook token estimators.
  *
- * Estimates prompt tokens only, and only for a provider that reported no
- * usage; a cache hit is never estimated. SillyTavern's tokenizer is loaded
- * lazily through an injected loader, so a missing tokenizer leaves the record
- * "unavailable" rather than turning it into a zero.
+ * Two estimates, both no more than the request text allows: a prompt total for
+ * a provider that reported no usage, and the per-message counts behind the
+ * prefix fingerprint (which run after any request with a readable body, so a
+ * failed row can still show what it shared). A cache hit is never estimated.
+ * SillyTavern's tokenizer is loaded lazily through an injected loader, so a
+ * missing tokenizer leaves the record "unavailable" rather than turning it into
+ * a zero.
  */
 
 import { messageText } from './message.js';
@@ -37,6 +40,42 @@ export function createPromptTokenEstimator({ loadTokenizer = () => null } = {}) 
             }
         }
         return total > 0 ? total : null;
+    };
+}
+
+/**
+ * Builds the per-message estimator behind the prefix fingerprint. Unlike the
+ * prompt total, an empty message is a measured zero here: it is a real position
+ * in the shared prefix. A failure anywhere leaves the whole array unavailable,
+ * so a missing count can never be summed as zero and pass as a short prefix.
+ *
+ * @param {object} [options]
+ * @param {() => (object|Promise<object>|null)} [options.loadTokenizer] Lazily
+ *   imports SillyTavern's tokenizer module.
+ * @returns {(messages: object[]) => Promise<(number|null)[]|null>}
+ */
+export function createMessageTokenEstimator({ loadTokenizer = () => null } = {}) {
+    const load = createTokenizerLoader(loadTokenizer);
+
+    return async function estimateMessageTokens(messages) {
+        if (!Array.isArray(messages)) return null;
+        const tokenizer = await load();
+        if (typeof tokenizer?.getTokenCountAsync !== 'function') return null;
+
+        const counts = [];
+        for (const message of messages) {
+            const text = messageText(message);
+            if (!text) {
+                counts.push(0);
+                continue;
+            }
+            try {
+                counts.push(await tokenizer.getTokenCountAsync(text));
+            } catch {
+                return null;
+            }
+        }
+        return counts;
     };
 }
 

@@ -750,3 +750,51 @@ describe('Spendbook drawer — measurement runs', () => {
         expect(container.querySelector('.spendbook-run-current').textContent).toMatch(/^No run started yet/);
     });
 });
+
+describe('Spendbook drawer — prefix diagnostics', () => {
+    beforeEach(() => {
+        document.body.innerHTML = '';
+    });
+
+    function mountWith(records) {
+        return mount({
+            settings: { trackingEnabled: true },
+            getSnapshot: () => ({
+                chatId: 'chat-a',
+                records,
+                trackingEnabled: true,
+                health: { matched: 1, captured: 1, skipped: 0, errors: 0 },
+                retention: null,
+                allTime: null,
+                archive: null,
+                runs: null,
+            }),
+        });
+    }
+
+    it('has a shared-prefix column and names a suspected breaker in that row', () => {
+        const { container } = mountWith([row({
+            hitTokens: 0,
+            sharedPrefixTokens: 2200,
+            possiblePrefixBreaker: true,
+        })]);
+
+        const headers = [...container.querySelectorAll('.spendbook-table:not(.spendbook-price-table) thead th')]
+            .map((header) => header.textContent.trim());
+        expect(headers).toContain('Shared prefix');
+
+        const [rendered] = container.querySelectorAll('.spendbook-rows tr');
+        const cell = rendered.querySelector('.spendbook-cell-prefix');
+        expect(cell.textContent).toContain('~2,200');
+        expect(cell.querySelector('.spendbook-prefix-flag').textContent).toBe('Possible prefix breaker');
+    });
+
+    it('shows a placeholder and no flag when there is no comparable prior request', () => {
+        const { container } = mountWith([row({ sharedPrefixTokens: null })]);
+
+        const [rendered] = container.querySelectorAll('.spendbook-rows tr');
+        const cell = rendered.querySelector('.spendbook-cell-prefix');
+        expect(cell.textContent).toBe('—');
+        expect(cell.querySelector('.spendbook-prefix-flag')).toBeNull();
+    });
+});

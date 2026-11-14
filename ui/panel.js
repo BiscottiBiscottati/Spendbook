@@ -272,10 +272,30 @@ function renderRow(row) {
     appendCell(tr, 'completion', row.completionLabel);
     appendCell(tr, 'cost', row.costLabel);
     appendCell(tr, 'saving', row.savingLabel);
+    appendPrefixCell(tr, row);
     appendCell(tr, 'latency', row.latencyLabel);
     appendCell(tr, 'status', row.statusLabel);
     appendCell(tr, 'source', row.sourceLabel);
     return tr;
+}
+
+/**
+ * The shared-prefix cell. The count is the tokenizer's estimate; the breaker
+ * note sits beside it in words, so a row says why it is suspect without a
+ * legend to learn.
+ *
+ * @param {HTMLElement} row
+ * @param {object} entry
+ * @returns {HTMLElement}
+ */
+function appendPrefixCell(row, entry) {
+    const cell = appendCell(row, 'prefix', entry.sharedPrefixLabel);
+    if (!entry.prefixBreakerLabel) return cell;
+    const flag = document.createElement('span');
+    flag.className = 'spendbook-prefix-flag';
+    flag.textContent = entry.prefixBreakerLabel;
+    cell.append(flag);
+    return cell;
 }
 
 function appendCell(row, field, text) {
@@ -283,4 +303,5 @@ function appendCell(row, field, text) {
     cell.className = `spendbook-cell-${field}`;
     cell.textContent = text;
     row.append(cell);
+    return cell;
 }

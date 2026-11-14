@@ -9,7 +9,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 
-import { createPromptTokenEstimator } from '../src/estimator.js';
+import { createMessageTokenEstimator, createPromptTokenEstimator } from '../src/estimator.js';
 
 function fakeTokenizer(countByText) {
     return {
@@ -78,5 +78,40 @@ describe('prompt-token estimator', () => {
 
         await expect(estimate(null)).resolves.toBeNull();
         await expect(estimate([{ content: '' }])).resolves.toBeNull();
+    });
+});
+
+describe('per-message token estimator', () => {
+    it('counts every message in order, keeping an empty one as a measured zero', async () => {
+        const tokenizer = fakeTokenizer({ hello: 10, world: 25 });
+        const estimate = createMessageTokenEstimator({ loadTokenizer: async () => tokenizer });
+
+        // An empty message is a real position in a shared prefix, so it is 0
+        // rather than unavailable.
+        await expect(estimate([
+            { role: 'system', content: 'hello' },
+            { role: 'assistant', content: '' },
+            { role: 'user', content: 'world' },
+        ])).resolves.toEqual([10, 0, 25]);
+    });
+
+    it('leaves the whole array unavailable when one message cannot be counted', async () => {
+        const estimate = createMessageTokenEstimator({
+            loadTokenizer: async () => ({
+                getTokenCountAsync: async () => {
+                    throw new Error('tokenizer failed');
+                },
+            }),
+        });
+
+        // A partial array would sum to a shorter prefix and hide a real break.
+        await expect(estimate([{ content: 'hello' }])).resolves.toBeNull();
+    });
+
+    it('stays unavailable without a tokenizer or messages', async () => {
+        const missing = createMessageTokenEstimator({ loadTokenizer: async () => null });
+
+        await expect(missing([{ content: 'hi' }])).resolves.toBeNull();
+        await expect(missing(null)).resolves.toBeNull();
     });
 });

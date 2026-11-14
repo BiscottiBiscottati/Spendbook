@@ -207,6 +207,14 @@
     white-space: nowrap;
 }
 
+/* The suspected breaker rides in the row it belongs to, in the warning colour,
+   so a scan down the table finds it without a legend. */
+.spendbook-prefix-flag {
+    margin-left: 6px;
+    color: var(--SmartThemeQuoteColor);
+    font-weight: 600;
+}
+
 .spendbook-prices {
     margin-top: 12px;
 }

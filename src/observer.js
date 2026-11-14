@@ -15,6 +15,7 @@
 
 import { createUsageId } from './ids.js';
 import { resolveUsageOrigin, USAGE_ORIGINS } from './origin.js';
+import { createPromptFingerprint } from './prefix.js';
 
 export const USAGE_CHAT_COMPLETION_PATH = '/api/backends/chat-completions/generate';
 export const USAGE_OBSERVER_MARKER = '__spendbook_usage_observer__';
@@ -34,11 +35,16 @@ export const USAGE_SINK_KEY = '__spendbook_usage_sink__';
  *   was sent.
  * @param {() => (string|null)} [options.getRunId] Measurement run open when the
  *   request was sent.
- * @param {(record: object) => void} [options.handleRecord] Sink that receives
- *   one normalized record per captured request.
+ * @param {(record: object, fingerprint: object|null) => void} [options.handleRecord]
+ *   Sink that receives one normalized record per captured request, plus the
+ *   transient prefix fingerprint beside it — hashes and counts only, never the
+ *   text, and never a field of the record the ledger stores.
  * @param {(messages: object[]) => (number|Promise<number|null>|null)} [options.estimatePromptTokens]
  *   Optional prompt-token estimate from the request messages, used only when
  *   the provider reported no usage. Runs after the response, never on its path.
+ * @param {(messages: object[]) => ((number|null)[]|Promise<(number|null)[]|null>)} [options.estimateMessageTokens]
+ *   Optional per-message counts behind the prefix fingerprint. Runs after any
+ *   request with a readable body, so a failed row can still show what it shared.
  * @param {() => void} [options.onSettle] Called after every capture attempt,
  *   including a failed one, so the health line can refresh.
  * @param {() => number} [options.now] Clock, injected for tests.
@@ -52,6 +58,7 @@ export function installUsageObserver({
     getRunId = () => null,
     handleRecord = () => {},
     estimatePromptTokens = null,
+    estimateMessageTokens = null,
     getOrigin = resolveUsageOrigin,
     onSettle = () => {},
     now = () => Date.now(),
@@ -67,6 +74,7 @@ export function installUsageObserver({
         getRunId,
         handleRecord,
         estimatePromptTokens,
+        estimateMessageTokens,
         getOrigin,
         onSettle,
         now,
@@ -258,8 +266,8 @@ async function captureFailedRecord(context) {
     const { sink, init, chatId, runId, origin, httpStatus, status, startedAt, latencyMs } = context;
     const body = readBodyOrCountSkipped(sink, init);
     if (!body) return;
-
-    emitRecord(sink, buildRecord({
+    const messageTokenCounts = await estimateMessageCounts(sink, body);
+    const record = buildRecord({
         body,
         chatId,
         runId,
@@ -269,7 +277,9 @@ async function captureFailedRecord(context) {
         status,
         startedAt,
         latencyMs,
-    }));
+    });
+
+    emitRecord(sink, record, buildFingerprint(record, body, messageTokenCounts));
 }
 
 /**
@@ -297,7 +307,8 @@ async function captureJsonRecord(context) {
     const estimatedPromptTokens = status === 'no-usage'
         ? await estimatePrompt(sink, body)
         : null;
-    emitRecord(sink, buildRecord({
+    const messageTokenCounts = await estimateMessageCounts(sink, body);
+    const record = buildRecord({
         body,
         chatId,
         runId,
@@ -310,12 +321,14 @@ async function captureJsonRecord(context) {
         estimatedPromptTokens,
         startedAt,
         latencyMs,
-    }));
+    });
+
+    emitRecord(sink, record, buildFingerprint(record, body, messageTokenCounts));
 }
 
-function emitRecord(sink, record) {
+function emitRecord(sink, record, fingerprint) {
     try {
-        sink.handleRecord(record);
+        sink.handleRecord(record, fingerprint);
         noteHealth(sink, 'captured');
     } catch {
         noteHealth(sink, 'errors');
@@ -343,7 +356,8 @@ async function captureStreamedRecord(context) {
         const estimatedPromptTokens = status === 'no-usage'
             ? await estimatePrompt(sink, body)
             : null;
-        emitRecord(sink, buildRecord({
+        const messageTokenCounts = await estimateMessageCounts(sink, body);
+        const record = buildRecord({
             body,
             chatId,
             runId,
@@ -355,7 +369,8 @@ async function captureStreamedRecord(context) {
             estimatedPromptTokens,
             startedAt,
             latencyMs,
-        }));
+        });
+        emitRecord(sink, record, buildFingerprint(record, body, messageTokenCounts));
     } finally {
         // Record first, then cancel: cancelling is fire-and-forget because a
         // tee-branch cancel can stay pending until the caller's branch drains.
@@ -533,19 +548,44 @@ function readChatCompletionBody(init) {
 }
 
 /**
- * Runs the injected estimator after a usage-less response. A missing or
- * failing estimator leaves the prompt count unavailable rather than inventing
- * a number; the observer still records the request.
+ * Runs one injected estimator after the response. A missing or failing
+ * estimator leaves the number unavailable rather than inventing one; the
+ * observer still records the request.
+ *
+ * @param {object} sink The installed sink.
+ * @param {string} name Estimator the sink publishes.
+ * @param {object} body Parsed request body.
+ * @param {(value: unknown) => boolean} usable Keeps a value the estimator
+ *   produced in a shape this observer can use.
+ * @returns {Promise<unknown|null>}
  */
-async function estimatePrompt(sink, body) {
-    const estimator = sink?.estimatePromptTokens;
+async function runEstimator(sink, name, body, usable) {
+    const estimator = sink?.[name];
     if (typeof estimator !== 'function' || !Array.isArray(body?.messages)) return null;
     try {
         const value = await estimator(body.messages);
-        return Number.isFinite(value) && value >= 0 ? Math.round(value) : null;
+        return usable(value) ? value : null;
     } catch {
         return null;
     }
+}
+
+/**
+ * The prompt total for a usage-less response, rounded because a tokenizer may
+ * answer with a fraction.
+ */
+async function estimatePrompt(sink, body) {
+    const total = await runEstimator(sink, 'estimatePromptTokens', body, isCountableTokens);
+    return Number.isFinite(total) ? Math.round(total) : null;
+}
+
+/** The per-message counts behind the prefix fingerprint. */
+async function estimateMessageCounts(sink, body) {
+    return runEstimator(sink, 'estimateMessageTokens', body, Array.isArray);
+}
+
+function isCountableTokens(value) {
+    return Number.isFinite(value) && value >= 0;
 }
 
 function buildRecord({
@@ -576,6 +616,8 @@ function buildRecord({
     const reportedMiss = toCount(reported?.prompt_cache_miss_tokens);
     const cacheWriteTokens = toCount(reported?.prompt_tokens_details?.cache_write_tokens)
         ?? toCount(reported?.cache_write_tokens);
+    const provider = body.chat_completion_source || 'unknown';
+    const model = body.model || responseModel || 'unknown';
 
     return {
         recordId: createUsageId('spendbook'),
@@ -584,8 +626,8 @@ function buildRecord({
         runId: typeof runId === 'string' ? runId : null,
         origin: origin?.origin ?? USAGE_ORIGINS.INTERNAL,
         label: origin?.label ?? null,
-        provider: body.chat_completion_source || 'unknown',
-        model: body.model || responseModel || 'unknown',
+        provider,
+        model,
         responseId,
         stream: body.stream === true,
         status,
@@ -614,6 +656,27 @@ function buildRecord({
         estimatedPromptTokens,
         usageSource: reported ? 'measured' : (estimatedPromptTokens != null ? 'estimated' : 'unavailable'),
     };
+}
+
+/**
+ * The transient fingerprint for one captured request. Its provider, model and
+ * origin are read from the row it was built for, so the baseline is keyed by
+ * exactly what the row records. Hashes and counts only: the request text is
+ * hashed and dropped, and the ledger consumes this instead of storing it.
+ *
+ * @param {object} record The row the observation produced.
+ * @param {object} body Parsed request body.
+ * @param {(number|null)[]|null} messageTokenCounts
+ * @returns {object|null}
+ */
+function buildFingerprint(record, body, messageTokenCounts) {
+    return createPromptFingerprint({
+        provider: record.provider,
+        model: record.model,
+        origin: record.origin,
+        messages: body.messages,
+        tokenCounts: messageTokenCounts,
+    });
 }
 
 function toCount(value) {
