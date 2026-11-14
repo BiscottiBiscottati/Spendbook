@@ -425,21 +425,29 @@ describe('Spendbook export — the chat-name opt-in', () => {
 });
 
 describe('Spendbook export — the filename', () => {
-    it('names the chat and the moment, without ever naming the chat file', () => {
+    it('names the download by timestamp alone unless the user opted in', () => {
         const chatContext = oneOnOneContext();
 
         const fileName = usageExportFileName({ now: EXPORTED_AT, chatContext });
 
+        expect(fileName).toBe('spendbook-usage-20261114-123456.json');
+        expect(fileName).not.toContain('Alice');
+        expect(fileName).not.toContain(chatContext.chatId);
+    });
+
+    it('names the chat and the moment when the user opted in, never the chat file', () => {
+        const chatContext = oneOnOneContext();
+
+        const fileName = usageExportFileName({ now: EXPORTED_AT, chatContext, includeChatNames: true });
+
         expect(fileName).toBe('spendbook-usage-Alice-20261114-123456.json');
-        // The name is what tells two downloads apart, so it is not behind the
-        // opt-in; the chat id is what the name must never carry.
         expect(fileName).not.toContain(chatContext.chatId);
     });
 
     it('names a group chat by its group, never by the member who is speaking', () => {
         const chatContext = groupContext();
 
-        const fileName = usageExportFileName({ now: EXPORTED_AT, chatContext });
+        const fileName = usageExportFileName({ now: EXPORTED_AT, chatContext, includeChatNames: true });
 
         expect(fileName).toBe('spendbook-usage-The-Trio-20261114-123456.json');
         expect(fileName).not.toContain('Bob');
@@ -447,11 +455,12 @@ describe('Spendbook export — the filename', () => {
     });
 
     it('names the download by timestamp alone while no chat is open', () => {
-        expect(usageExportFileName({ now: EXPORTED_AT, chatContext: null }))
+        expect(usageExportFileName({ now: EXPORTED_AT, chatContext: null, includeChatNames: true }))
             .toBe('spendbook-usage-20261114-123456.json');
         expect(usageExportFileName({
             now: EXPORTED_AT,
             chatContext: { chatId: undefined, name2: 'SillyTavern System' },
+            includeChatNames: true,
         })).toBe('spendbook-usage-20261114-123456.json');
     });
 
@@ -459,6 +468,7 @@ describe('Spendbook export — the filename', () => {
         expect(usageExportFileName({
             now: EXPORTED_AT,
             chatContext: oneOnOneContext({ name2: 'The Trio: "A/B" <2>' }),
+            includeChatNames: true,
         })).toBe('spendbook-usage-The-Trio-A-B-2-20261114-123456.json');
     });
 
@@ -466,6 +476,7 @@ describe('Spendbook export — the filename', () => {
         expect(usageExportFileName({
             now: EXPORTED_AT,
             chatContext: oneOnOneContext({ name2: 'x'.repeat(100) }),
+            includeChatNames: true,
         })).toBe(`spendbook-usage-${'x'.repeat(60)}-20261114-123456.json`);
     });
 });

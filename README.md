@@ -23,9 +23,8 @@ the first release. The decision and its reasoning are in
   hit rate per configuration label a host extension set.
 - Export one versioned JSON file for a bug report: this chat's records, its
   measurement runs, the counters for the rows the retention cap folded and the
-  all-time totals — a fixed field list, with **no chat identifiers**. The name
-  inside the file is opt-in; the download is always named after the chat so you
-  can tell two exports apart.
+  all-time totals — a fixed field list, with **no chat identifiers** and no chat
+  name, in the file or in its name, unless you ask for it.
 
 ## What it will not do
 

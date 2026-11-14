@@ -95,20 +95,25 @@ export function buildUsageExport({
 }
 
 /**
- * A download name that is safe on every platform and says which chat and which
- * moment the file came from. It names the chat by the same rule the contents use
- * — the character, or the group in a group chat — and never by chat id, which is
- * the chat's file name. The name is not part of the opt-in: it is what tells two
- * downloads apart, and a user who wants the name out of the contents still needs
- * the file to be findable.
+ * A download name that is safe on every platform and says which moment the file
+ * came from. While the user has not opted in it says nothing else; with the
+ * opt-in on it also names the chat — the character, or the group in a group chat
+ * — and never by chat id, which is the chat's file name. Both surfaces go
+ * through `exportChatName`, so the file name cannot name a chat the contents
+ * refuse to name.
  *
  * @param {object} [options]
  * @param {number} [options.now] Export time, injected for tests.
  * @param {object|null} [options.chatContext] SillyTavern's `getContext()`.
+ * @param {boolean} [options.includeChatNames] The user's opt-in; off by default.
  * @returns {string}
  */
-export function usageExportFileName({ now = Date.now(), chatContext = null } = {}) {
-    const name = resolveChatName(chatContext);
+export function usageExportFileName({
+    now = Date.now(),
+    chatContext = null,
+    includeChatNames = false,
+} = {}) {
+    const name = exportChatName({ chatContext, includeChatNames });
     const slug = name ? chatNameSlug(name) : '';
     return `spendbook-usage-${slug ? `${slug}-` : ''}${exportStamp(now)}.json`;
 }

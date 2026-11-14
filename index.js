@@ -116,7 +116,7 @@ function createChatExport() {
     const chatContext = getContext();
     const snapshot = ledger.exportSnapshotFor(getChatId());
     return {
-        fileName: usageExportFileName({ now, chatContext }),
+        fileName: usageExportFileName({ now, chatContext, includeChatNames: settings.includeChatNames }),
         content: JSON.stringify(
             buildUsageExport({ now, chatContext, includeChatNames: settings.includeChatNames, snapshot }),
             null,

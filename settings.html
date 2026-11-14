@@ -92,8 +92,8 @@
             </label>
             <small class="spendbook-export-optin-hint">
                 Off by default. When you turn it on, the character or group name of the open
-                chat is added to the file itself. The download’s name always says which chat
-                and when, and a chat file name is never included.
+                chat is added to the file and to the download’s name; a chat file name is
+                never included.
             </small>
             <button type="button" class="menu_button spendbook-export-button">Export JSON</button>
         </section>
@@ -175,10 +175,9 @@
         </section>
         <small class="spendbook-privacy-note">
             Spendbook records token counts, cost and latency for chat-completion
-            requests made by this browser. It never stores prompt text. An export
-            carries no chat file name; the download is named after the chat so you
-            can find it, and the chat’s name goes inside the file only if you ask
-            for it.
+            requests made by this browser. It never stores prompt text, and an
+            export carries no chat file name; the chat’s own name appears in the
+            file and in the download’s name only if you ask for it.
         </small>
     </div>
 </div>
