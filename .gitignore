@@ -1,5 +1,8 @@
 node_modules/
 coverage/
+
+# Local issue tracker, specs and working notes — never published to strangers.
+.scratch/
 *.log
 .DS_Store
 .vscode/

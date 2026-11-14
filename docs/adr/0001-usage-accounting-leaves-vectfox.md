@@ -20,7 +20,7 @@ and export modules are pure and run without storage at all; the panel takes its
 file-download and confirm callbacks injected. There is no import from the
 vector backends, the vector API or the provider layer anywhere in the feature.
 What it did have was reverse coupling — VectFox's own LLM helper called into the
-feature to label its requests — plus VectFox vocabulary baked in: a
+feature to label its requests — plus VectFox vocabulary baked in: an
 internal-only origin, a ghost-only configuration snapshot, and a default
 price table seeded with VectFox's own model's cost.
 
@@ -118,6 +118,9 @@ settings namespace, CSS and tab strip.
 
 ## Provenance
 
-This decision was written while the feature still lived in the host extension,
-and is kept here as that repository's ADR-0005; this file is the public-safe
-copy, renumbered because this repo's own decisions start at 0001.
+This decision was written while the feature still lived inside VectFox, and is
+kept as ADR-0005 in the project that planned the split. This file is the
+public-safe copy of that record, renumbered because this repository's own
+decisions start at 0001. Host-specific identifiers — source paths, storage keys
+and that project's own layout — are abstracted here; the context, the decision
+and the consequences are unchanged.
