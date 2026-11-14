@@ -75,6 +75,9 @@ function installObserver() {
     return installUsageObserver({
         isEnabled: () => readSettings().trackingEnabled,
         getChatId,
+        // The run is resolved when the request is sent, so a run started while a
+        // request is in flight does not claim it.
+        getRunId: () => ledger.currentRunIdFor(getChatId()),
         estimatePromptTokens,
         handleRecord: (record) => ledger.add(record),
         // Refresh on settle, not on record: a skipped capture writes no record
@@ -100,12 +103,14 @@ async function mountSettingsDrawer() {
         html,
         settings: readSettings(),
         getSnapshot: () => ({
+            chatId: getChatId(),
             records: ledger.recordsFor(getChatId()),
             trackingEnabled: readSettings().trackingEnabled,
             health: getUsageObserverHealth(),
             retention: ledger.retentionFor(getChatId()),
             allTime: ledger.allTimeForView(),
             archive: ledger.archivedFor(getChatId()),
+            runs: ledger.runsFor(getChatId()),
         }),
         onTrackingChange: (trackingEnabled) => {
             setTrackingEnabled(extension_settings, trackingEnabled);
@@ -126,6 +131,7 @@ async function mountSettingsDrawer() {
             setPriceTable(extension_settings, prices);
             saveSettingsDebounced();
         },
+        onStartRun: (label) => ledger.startRun({ chatId: getChatId(), label }),
     });
     refreshPanel = panel.refresh;
 }

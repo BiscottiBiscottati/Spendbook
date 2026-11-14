@@ -13,13 +13,12 @@
  * is already installed passes requests through untouched.
  */
 
+import { createUsageId } from './ids.js';
 import { resolveUsageOrigin, USAGE_ORIGINS } from './origin.js';
 
 export const USAGE_CHAT_COMPLETION_PATH = '/api/backends/chat-completions/generate';
 export const USAGE_OBSERVER_MARKER = '__spendbook_usage_observer__';
 export const USAGE_SINK_KEY = '__spendbook_usage_sink__';
-
-let _recordSequence = 0;
 
 /**
  * Installs (once) the observer over target.fetch and publishes the sink the
@@ -579,7 +578,7 @@ function buildRecord({
         ?? toCount(reported?.cache_write_tokens);
 
     return {
-        recordId: createRecordId(),
+        recordId: createUsageId('spendbook'),
         timestamp: startedAt,
         chatId,
         runId: typeof runId === 'string' ? runId : null,
@@ -619,14 +618,4 @@ function buildRecord({
 
 function toCount(value) {
     return Number.isFinite(value) ? value : null;
-}
-
-function createRecordId() {
-    try {
-        if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
-    } catch {
-        /* fall through to the sequence */
-    }
-    _recordSequence += 1;
-    return `spendbook-${Date.now().toString(36)}-${_recordSequence}`;
 }

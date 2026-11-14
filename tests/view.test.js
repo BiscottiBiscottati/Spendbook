@@ -9,6 +9,7 @@ import { describe, it, expect } from 'vitest';
 import { buildUsageView, describeAllTime } from '../ui/view.js';
 import { addRecordToUsageArchive, createUsageArchive } from '../src/stats.js';
 import { ACME_PRICES, ACME_PRICED_ROW } from './fixtures/prices.js';
+import { CHAT_RUNS } from './fixtures/runs.js';
 
 function record(overrides = {}) {
     return {
@@ -560,5 +561,156 @@ describe('Spendbook view — per-origin cards', () => {
 
         expect(metric(story, 'hitRate')).toMatchObject({ value: '50%', note: '1,000 of 10,000 prompt tokens' });
         expect(metric(story, 'coverage').value).toBe('100%');
+    });
+});
+
+describe('Spendbook view — measurement runs', () => {
+    const runs = CHAT_RUNS;
+
+    it('lists every run, newest first, and keeps the current one visible', () => {
+        const view = buildUsageView({ records: [record()], trackingEnabled: true, prices: ACME_PRICES, runs });
+
+        expect(view.runs.items.map((item) => item.label)).toEqual(['after', 'before']);
+        expect(view.runs.items.map((item) => item.isCurrent)).toEqual([true, false]);
+        expect(view.runs.selectedRunId).toBeNull();
+        expect(view.runs.currentLabel).toMatch(/^Current run: after · started /);
+        expect(view.runs.currentLabel).toMatch(/\d{2}:\d{2}/);
+    });
+
+    it('says requests belong to no run before the first one starts', () => {
+        const view = buildUsageView({ records: [record()], trackingEnabled: true, prices: ACME_PRICES });
+
+        expect(view.runs.items).toEqual([]);
+        expect(view.runs.currentLabel).toBe('No run started yet — requests belong to no run until you start one.');
+    });
+
+    it('says no run is current when the chat lists runs but names none', () => {
+        const view = buildUsageView({
+            records: [record({ runId: 'run-1' })],
+            trackingEnabled: true,
+            prices: ACME_PRICES,
+            runs: { runs: runs.runs, currentRunId: null },
+        });
+
+        expect(view.runs.items).toHaveLength(2);
+        expect(view.runs.items.some((item) => item.isCurrent)).toBe(false);
+        expect(view.runs.currentLabel).toBe('No current run — requests belong to no run until you start one.');
+    });
+
+    it('filters the table and the cards to one run while the bar keeps every run', () => {
+        const records = [
+            record({ recordId: 'r-run2', runId: 'run-2', promptTokens: 2000 }),
+            record({ recordId: 'r-run1', runId: 'run-1', promptTokens: 1200 }),
+            record({ recordId: 'r-before', runId: null, promptTokens: 100 }),
+        ];
+
+        const filtered = buildUsageView({
+            records,
+            trackingEnabled: true,
+            prices: ACME_PRICES,
+            runs,
+            selectedRunId: 'run-1',
+        });
+
+        expect(filtered.rows.map((row) => row.recordId)).toEqual(['r-run1']);
+        expect(filtered.runs.items.map((item) => item.label)).toEqual(['after', 'before']);
+        expect(filtered.runs.selectedRunId).toBe('run-1');
+        expect(filtered.cards[0].title).toBe('This run');
+        expect(metric(filtered.cards[0], 'prompt').value).toBe('1,200');
+        expect(metric(filtered.cards[0], 'cached').value).toBe('400');
+
+        const all = buildUsageView({ records, trackingEnabled: true, prices: ACME_PRICES, runs });
+        expect(all.rows.map((row) => row.recordId)).toEqual(['r-run2', 'r-run1', 'r-before']);
+        expect(all.cards[0].title).toBe('This chat');
+        expect(metric(all.cards[0], 'prompt').value).toBe('3,300');
+    });
+
+    it('leaves the folded counters out of a run and says so', () => {
+        const archive = createUsageArchive();
+        addRecordToUsageArchive(archive, record({ recordId: 'r-folded' }));
+        const records = [record({ recordId: 'r-run1', runId: 'run-1', promptTokens: 500, hitTokens: 100 })];
+        const retention = { limit: 500, retained: 1, total: 2 };
+
+        const filtered = buildUsageView({
+            records,
+            trackingEnabled: true,
+            archive,
+            retention,
+            prices: ACME_PRICES,
+            runs,
+            selectedRunId: 'run-1',
+        });
+
+        // The folded copy of the fixture row would add 1,200 prompt tokens.
+        expect(metric(filtered.cards[0], 'prompt').value).toBe('500');
+        expect(filtered.retention.label).toBe(
+            'Retention: this view covers one run — 1 folded row cannot be attributed to a run, so it is left out.',
+        );
+
+        const all = buildUsageView({ records, trackingEnabled: true, archive, retention, prices: ACME_PRICES, runs });
+        expect(metric(all.cards[0], 'prompt').value).toBe('1,700');
+    });
+
+    it('explains a run with no folded rows without inventing an exclusion', () => {
+        const view = buildUsageView({
+            records: [record({ runId: 'run-1' })],
+            trackingEnabled: true,
+            retention: { limit: 500, retained: 1, total: 1 },
+            prices: ACME_PRICES,
+            runs,
+            selectedRunId: 'run-1',
+        });
+
+        expect(view.retention.label).toBe(
+            'Retention: this view covers one run — rows the cap folds cannot be attributed to a run, so a run’s view leaves them out.',
+        );
+    });
+
+    it('tells an empty run apart from a chat with nothing recorded', () => {
+        const view = buildUsageView({
+            records: [record({ recordId: 'r-run1', runId: 'run-1' })],
+            trackingEnabled: true,
+            prices: ACME_PRICES,
+            runs,
+            selectedRunId: 'run-2',
+        });
+
+        expect(view.rows).toEqual([]);
+        expect(view.empty).toBe(true);
+        expect(view.emptyMessage).toBe(
+            'No requests recorded in this run yet. Send a message while the run is open to fill the table.',
+        );
+    });
+
+    it('narrows the per-origin cards to the run too', () => {
+        const records = [
+            record({ recordId: 'r-1', runId: 'run-1', origin: 'story', promptTokens: 1000, hitTokens: 500 }),
+            record({ recordId: 'r-2', runId: 'run-1', origin: 'internal', promptTokens: 300, hitTokens: 60 }),
+            record({ recordId: 'r-3', runId: 'run-2', origin: 'internal', promptTokens: 999 }),
+        ];
+
+        const view = buildUsageView({
+            records,
+            trackingEnabled: true,
+            prices: ACME_PRICES,
+            runs,
+            selectedRunId: 'run-1',
+        });
+
+        expect(view.cards.map((card) => card.title)).toEqual(['This run', 'Story', 'Internal']);
+        expect(metric(view.cards.find((card) => card.scope === 'internal'), 'prompt').value).toBe('300');
+    });
+
+    it('falls back to all runs when the selected run is not listed', () => {
+        const view = buildUsageView({
+            records: [record({ runId: null })],
+            trackingEnabled: true,
+            prices: ACME_PRICES,
+            runs,
+            selectedRunId: 'run-gone',
+        });
+
+        expect(view.runs.selectedRunId).toBeNull();
+        expect(view.rows).toHaveLength(1);
     });
 });

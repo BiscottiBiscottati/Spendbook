@@ -776,3 +776,137 @@ describe('Spendbook ledger — reset this chat', () => {
         consoleError.mockRestore();
     });
 });
+
+describe('Spendbook ledger — measurement runs', () => {
+    it('starts a run in the open chat with an id, a label and a start time, and makes it current', () => {
+        const harness = createHarness({ now: () => 9000 });
+
+        const run = harness.ledger.startRun({ label: 'batch 30' });
+
+        expect(run).toEqual({ runId: expect.any(String), label: 'batch 30', startedAt: 9000 });
+        expect(harness.ledger.runsFor('chat-a')).toEqual({ runs: [run], currentRunId: run.runId });
+        expect(harness.ledger.currentRunIdFor('chat-a')).toBe(run.runId);
+    });
+
+    it('names an unlabelled run by its ordinal and tidies a pasted label', () => {
+        const harness = createHarness();
+
+        expect(harness.ledger.startRun().label).toBe('Run 1');
+        expect(harness.ledger.startRun({ label: '  batch   30  ' }).label).toBe('batch 30');
+        expect(harness.ledger.startRun({ label: '   ' }).label).toBe('Run 3');
+    });
+
+    it('keeps the earlier run listed and makes the newest one current', () => {
+        let now = 9000;
+        const harness = createHarness({ now: () => now });
+        const first = harness.ledger.startRun({ label: 'before' });
+        now = 9100;
+        const second = harness.ledger.startRun({ label: 'after' });
+
+        expect(harness.ledger.runsFor('chat-a')).toEqual({
+            runs: [second, first],
+            currentRunId: second.runId,
+        });
+        expect(harness.ledger.currentRunIdFor('chat-a')).toBe(second.runId);
+    });
+
+    it('reads the runs back with the chat on a fresh ledger', () => {
+        const harness = createHarness();
+        const first = harness.ledger.startRun({ label: 'before' });
+        const second = harness.ledger.startRun({ label: 'after' });
+
+        const reloaded = harness.createLedger();
+        reloaded.loadChat('chat-a');
+
+        expect(reloaded.runsFor('chat-a')).toEqual({ runs: [second, first], currentRunId: second.runId });
+        expect(reloaded.currentRunIdFor('chat-a')).toBe(second.runId);
+    });
+
+    it('keeps one chat’s runs out of another chat', () => {
+        const harness = createHarness();
+        const run = harness.ledger.startRun({ label: 'batch 30' });
+
+        switchChat(harness, 'chat-b');
+
+        expect(harness.ledger.runsFor('chat-b')).toEqual({ runs: [], currentRunId: null });
+        expect(harness.ledger.currentRunIdFor('chat-b')).toBeNull();
+
+        const other = harness.ledger.startRun({ label: 'another chat' });
+        switchChat(harness, 'chat-a');
+
+        expect(harness.ledger.runsFor('chat-a')).toEqual({ runs: [run], currentRunId: run.runId });
+        expect(other.runId).not.toBe(run.runId);
+    });
+
+    it('has no run to start without an open chat', () => {
+        const harness = createHarness({ chatId: null });
+
+        expect(harness.ledger.startRun({ label: 'nowhere' })).toBeNull();
+        expect(harness.ledger.runsFor(null)).toEqual({ runs: [], currentRunId: null });
+    });
+
+    it('drops a chat’s runs with its rows when the chat is reset', () => {
+        const harness = createHarness();
+        harness.ledger.startRun({ label: 'batch 30' });
+        harness.ledger.add(record());
+
+        harness.ledger.resetChat('chat-a');
+
+        expect(harness.ledger.runsFor('chat-a')).toEqual({ runs: [], currentRunId: null });
+        expect(harness.ledger.currentRunIdFor('chat-a')).toBeNull();
+
+        const reloaded = harness.createLedger();
+        reloaded.loadChat('chat-a');
+        expect(reloaded.runsFor('chat-a')).toEqual({ runs: [], currentRunId: null });
+    });
+
+    it('carries a chat’s runs to its renamed id', async () => {
+        const harness = createHarness({ chatId: 'chat-b' });
+        const run = harness.ledger.startRun({ chatId: 'chat-a', label: 'batch 30' });
+
+        await harness.ledger.handleChatRenamed('chat-a', 'chat-renamed');
+
+        expect(harness.ledger.runsFor('chat-renamed')).toEqual({ runs: [run], currentRunId: run.runId });
+        expect(harness.ledger.runsFor('chat-a')).toEqual({ runs: [], currentRunId: null });
+    });
+
+    it('keeps the later run current when a rename merges two chats’ runs', async () => {
+        let now = 9000;
+        const harness = createHarness({ chatId: 'chat-b', now: () => now });
+        const older = harness.ledger.startRun({ chatId: 'chat-b', label: 'b-old' });
+        now = 9200;
+        const newer = harness.ledger.startRun({ chatId: 'chat-a', label: 'a-new' });
+
+        await harness.ledger.handleChatRenamed('chat-a', 'chat-b');
+
+        expect(harness.ledger.runsFor('chat-b')).toEqual({
+            runs: [newer, older],
+            currentRunId: newer.runId,
+        });
+    });
+
+    it('ignores a persisted run it cannot use and a current id that names none', () => {
+        const harness = createHarness({
+            metadata: {
+                [USAGE_CHAT_METADATA_KEY]: {
+                    ownerChatId: 'chat-a',
+                    revision: 3,
+                    records: [],
+                    runs: [
+                        { label: 'no id', startedAt: 1 },
+                        { runId: 'run-1', label: 'kept', startedAt: 2 },
+                        { runId: 'run-1', label: 'duplicate', startedAt: 3 },
+                    ],
+                    currentRunId: 'run-missing',
+                },
+            },
+        });
+
+        harness.ledger.loadChat('chat-a');
+
+        expect(harness.ledger.runsFor('chat-a')).toEqual({
+            runs: [{ runId: 'run-1', label: 'kept', startedAt: 2 }],
+            currentRunId: null,
+        });
+    });
+});

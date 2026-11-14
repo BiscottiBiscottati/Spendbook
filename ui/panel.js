@@ -26,10 +26,11 @@ const RESET_ALL_TIME_MESSAGE = 'Clear Spendbook’s all-time totals? '
  * @param {string} options.html Rendered drawer markup
  * @param {import('../src/settings.js').SpendbookSettings} options.settings Settings with defaults already merged
  * @param {(trackingEnabled: boolean) => void} options.onTrackingChange Called when the user flips the tracking toggle
- * @param {() => ({records: object[], trackingEnabled: boolean, health: object|null, retention: object|null, allTime: object|null, archive: object|null})} [options.getSnapshot] Reads the current ledger and observer state; called on mount, on refresh, after a toggle change and after a price edit
+ * @param {() => ({chatId?: string|null, records: object[], trackingEnabled: boolean, health: object|null, retention: object|null, allTime: object|null, archive: object|null, runs?: object|null})} [options.getSnapshot] Reads the current ledger and observer state; called on mount, on refresh, after a toggle change, a run start and a price edit
  * @param {() => void} [options.onResetChat] Clears the open chat after the user confirmed it
  * @param {() => void} [options.onResetAllTime] Clears the all-time totals after the user confirmed it
  * @param {(prices: import('../src/prices.js').UsagePriceTable) => void} [options.onPricesChange] Persists the edited price table
+ * @param {(label: string) => (object|null)} [options.onStartRun] Starts a measurement run in the open chat and returns it
  * @param {(message: string) => boolean} [options.confirmReset] Asks the user; declining leaves the ledger untouched
  * @returns {{root: HTMLElement, refresh: () => void}} The mounted drawer and its repaint function
  */
@@ -42,6 +43,7 @@ export function mountSpendbookPanel({
     onResetChat = () => {},
     onResetAllTime = () => {},
     onPricesChange = () => {},
+    onStartRun = () => null,
     confirmReset = defaultConfirmReset,
 }) {
     container.insertAdjacentHTML('beforeend', html);
@@ -65,8 +67,13 @@ export function mountSpendbookPanel({
     const resetChatButton = root.querySelector('.spendbook-reset-chat');
     const resetAllTimeButton = root.querySelector('.spendbook-reset-alltime');
     const priceSection = root.querySelector('.spendbook-prices');
+    const runCurrentLine = root.querySelector('.spendbook-run-current');
+    const runFilter = root.querySelector('.spendbook-run-filter');
+    const runLabelInput = root.querySelector('.spendbook-run-label');
+    const runStartButton = root.querySelector('.spendbook-run-start');
     if (!healthLine || !cardsContainer || !allTimeLine || !emptyLine || !table || !rows
-        || !retentionLine || !resetChatButton || !resetAllTimeButton) {
+        || !retentionLine || !resetChatButton || !resetAllTimeButton
+        || !runCurrentLine || !runFilter || !runLabelInput || !runStartButton) {
         throw new Error('Spendbook: the settings template has no usage table.');
     }
 
@@ -75,10 +82,28 @@ export function mountSpendbookPanel({
         return { records: [], trackingEnabled: settings.trackingEnabled, health: null };
     };
 
+    // The run the user filtered to, and the chat it belongs to. A run id is
+    // unique to one chat, so a switch must clear the filter rather than show a
+    // window that belongs to the chat the user left.
+    let selectedRunId = '';
+    let activeChatId = null;
+    // Null, not '', so the first render always writes the options: an empty run
+    // list still needs its "All runs" option.
+    let runOptionsSignature = null;
+
     const refresh = () => {
-        const view = buildUsageView({ ...readSnapshot(), prices: editor.prices });
+        const snapshot = readSnapshot();
+        if (snapshot.chatId !== activeChatId) {
+            activeChatId = snapshot.chatId;
+            selectedRunId = '';
+        }
+        const view = buildUsageView({ ...snapshot, selectedRunId, prices: editor.prices });
+        // A run the chat no longer lists (a reset, a rename) stops being a filter.
+        // The select's "all runs" option is the empty string; the view speaks null.
+        selectedRunId = view.runs.selectedRunId ?? '';
         healthLine.textContent = view.health.label;
         healthLine.dataset.state = view.health.state;
+        renderRunBar(view.runs, { canStart: !!snapshot.chatId });
         cardsContainer.replaceChildren(...view.cards.map(renderCard));
         allTimeLine.textContent = view.allTime.label;
         emptyLine.textContent = view.empty ? view.emptyMessage : '';
@@ -86,6 +111,27 @@ export function mountSpendbookPanel({
         table.hidden = view.empty;
         retentionLine.textContent = view.retention.label;
         rows.replaceChildren(...view.rows.map(renderRow));
+    };
+
+    /**
+     * Every run is listed even while one is shown, so switching back to all runs
+     * needs no second control. The options are rebuilt only when the runs change,
+     * so a capture arriving while the list is open does not close it.
+     */
+    const renderRunBar = (runs, { canStart }) => {
+        runCurrentLine.textContent = runs.currentLabel;
+        const signature = runs.items.map((item) => `${item.runId}\u0000${item.optionLabel}`).join('\u0001');
+        if (signature !== runOptionsSignature) {
+            runOptionsSignature = signature;
+            runFilter.replaceChildren(
+                createOption('', 'All runs'),
+                ...runs.items.map((item) => createOption(item.runId, item.optionLabel)),
+            );
+        }
+        runFilter.value = selectedRunId;
+        runFilter.disabled = runs.items.length === 0;
+        runLabelInput.disabled = !canStart;
+        runStartButton.disabled = !canStart;
     };
 
     // Only edits that change computed results repaint; the editor keeps its own
@@ -114,9 +160,30 @@ export function mountSpendbookPanel({
         onResetAllTime();
     });
 
+    runFilter.addEventListener('change', () => {
+        selectedRunId = runFilter.value;
+        refresh();
+    });
+    runStartButton.addEventListener('click', () => {
+        // Starting a run adds a window; it deliberately leaves the current view
+        // alone, so the drawer never empties itself under the user's cursor. The
+        // new run is listed and named as current straight away.
+        if (!onStartRun(runLabelInput.value)) return;
+        runLabelInput.value = '';
+        refresh();
+    });
+
     refresh();
 
     return { root, refresh };
+}
+
+/** One option of the run filter, whose "All runs" entry is the empty value. */
+function createOption(value, text) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = text;
+    return option;
 }
 
 /**

@@ -24,6 +24,15 @@ const PERCENT_FORMAT = new Intl.NumberFormat('en-US', {
     style: 'percent',
     maximumFractionDigits: 1,
 });
+// A run is a marker the user comes back to later, so its time carries the day:
+// a filtered view of yesterday's run must not read like this morning's.
+const RUN_TIME_FORMAT = new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+});
 
 const KNOWN_ORIGINS = new Set(Object.values(USAGE_ORIGINS));
 
@@ -60,11 +69,14 @@ const SOURCE_LABELS = Object.freeze({
  * @param {{totals: object, chats: number}|null} [options.allTime] Cross-chat aggregate.
  * @param {{total?: object, byOrigin?: object, byModel?: object}|null} [options.archive] Counters of the rows the retention cap folded.
  * @param {import('../src/prices.js').UsagePriceTable|null} [options.prices] User-entered price table.
+ * @param {{runs?: object[], currentRunId?: string|null}|null} [options.runs] The chat's measurement runs.
+ * @param {string|null} [options.selectedRunId] Run the user filtered to, if any.
  * @returns {{
  *   trackingEnabled: boolean,
  *   health: {state: string, label: string},
  *   retention: {limit: number, retained: number, total: number, folded: number, label: string},
  *   allTime: {requests: number, excluded: number, chats: number, label: string},
+ *   runs: {items: object[], selectedRunId: string|null, currentLabel: string},
  *   cards: object[],
  *   empty: boolean,
  *   emptyMessage: string,
@@ -79,36 +91,115 @@ export function buildUsageView({
     allTime = null,
     archive = null,
     prices = null,
+    runs = null,
+    selectedRunId = null,
 } = {}) {
-    const rows = (Array.isArray(records) ? records : []).map((record) => buildRow(record, prices));
+    const runView = describeRuns(runs, selectedRunId);
+    const filtered = !!runView.selectedRunId;
+    // One filtered list feeds every results surface, so the cards, the rows and
+    // the comparison cannot describe different requests.
+    const allRecords = Array.isArray(records) ? records : [];
+    const visibleRecords = filtered
+        ? allRecords.filter((record) => record?.runId === runView.selectedRunId)
+        : allRecords;
+    const rows = visibleRecords.map((record) => buildRow(record, prices));
 
     return {
         trackingEnabled,
         health: describeObserverHealth({ trackingEnabled, health }),
-        retention: describeRetention(retention),
+        retention: describeRetention(retention, { filtered }),
         allTime: describeAllTime(allTime, { hasPrices: hasPriceEntries(prices) }),
-        cards: buildCards(sumUsageRecords({ records, archive, prices }), prices),
+        runs: runView,
+        cards: buildCards(
+            // A folded row carries no run id, so a run's view cannot include the
+            // retention counters.
+            sumUsageRecords({ records: visibleRecords, archive: filtered ? null : archive, prices }),
+            prices,
+            { filtered },
+        ),
         empty: rows.length === 0,
-        emptyMessage: trackingEnabled
-            ? 'No requests recorded yet. Send a message with tracking on to start the table.'
-            : 'Tracking is off. Turn on tracking to record requests in this chat.',
+        emptyMessage: describeEmptyMessage({ trackingEnabled, filtered }),
         rows,
     };
 }
 
 /**
+ * What an empty table means, which is not the same before a first request, with
+ * tracking off, and inside a run that has not recorded anything yet.
+ *
+ * @param {{trackingEnabled: boolean, filtered: boolean}} options
+ * @returns {string}
+ */
+function describeEmptyMessage({ trackingEnabled, filtered }) {
+    if (!trackingEnabled) return 'Tracking is off. Turn on tracking to record requests in this chat.';
+    if (filtered) return 'No requests recorded in this run yet. Send a message while the run is open to fill the table.';
+    return 'No requests recorded yet. Send a message with tracking on to start the table.';
+}
+
+/**
+ * The run bar: every run the chat keeps, newest first, with the current one
+ * marked so a new run can be started without losing sight of it. A run that is
+ * not listed cannot be filtered to, so a stale selection resolves to none.
+ *
+ * @param {{runs?: object[], currentRunId?: string|null}|null} runs
+ * @param {string|null} selectedRunId
+ * @returns {{items: object[], selectedRunId: string|null, currentLabel: string}}
+ */
+export function describeRuns(runs, selectedRunId = null) {
+    const items = [];
+    for (const run of Array.isArray(runs?.runs) ? runs.runs : []) {
+        if (!run || typeof run.runId !== 'string' || !run.runId) continue;
+        const label = run.label || run.runId;
+        const timeLabel = formatRunTime(run.startedAt);
+        items.push({
+            runId: run.runId,
+            label,
+            timeLabel,
+            optionLabel: `${label} · ${timeLabel}`,
+            isCurrent: run.runId === runs.currentRunId,
+        });
+    }
+    const selected = items.find((item) => item.runId === selectedRunId) ?? null;
+    const current = items.find((item) => item.isCurrent) ?? null;
+
+    return {
+        items,
+        selectedRunId: selected?.runId ?? null,
+        // A listed run with no current one is possible (a merge older than this
+        // shape, a hand-edited file), and it must not read as "no run started".
+        currentLabel: current
+            ? `Current run: ${current.label} · started ${current.timeLabel}.`
+            : (items.length > 0
+                ? 'No current run — requests belong to no run until you start one.'
+                : 'No run started yet — requests belong to no run until you start one.'),
+    };
+}
+
+/**
  * The retention note: how many rows the table holds and how many older rows
- * the counters include after the cap folded them.
+ * the counters include after the cap folded them. The counters describe the
+ * chat, and a folded row carries no run id, so a view of one run excludes them
+ * and the note says why rather than leaving rows unexplained.
  *
  * @param {{limit?: number, retained?: number, total?: number}|null} [retention]
+ * @param {{filtered?: boolean}} [options]
  * @returns {{limit: number, retained: number, total: number, folded: number, label: string}}
  */
-export function describeRetention(retention = {}) {
+export function describeRetention(retention = {}, { filtered = false } = {}) {
     const limit = toCount(retention?.limit);
     const retained = toCount(retention?.retained);
     const total = Math.max(retained, toCount(retention?.total));
     const folded = total - retained;
     const summary = { limit, retained, total, folded };
+
+    if (filtered) {
+        // Without the counters the note cannot claim how many were folded, so it
+        // states the rule instead of a count it does not have.
+        const label = folded > 0
+            ? `Retention: this view covers one run — ${formatCountLabel(folded, 'folded row')} cannot be attributed to a run, so ${folded === 1 ? 'it is' : 'they are'} left out.`
+            : 'Retention: this view covers one run — rows the cap folds cannot be attributed to a run, so a run’s view leaves them out.';
+        return { ...summary, label };
+    }
 
     if (total === 0) {
         return {
@@ -185,15 +276,17 @@ export function describeAllTime(allTime = {}, { hasPrices = false } = {}) {
  *
  * @param {{counters: object, cost: object, saving: object, byOrigin: object}} usage
  * @param {import('../src/prices.js').UsagePriceTable|null} prices
+ * @param {{filtered?: boolean}} [options] Whether the sums cover one run instead
+ *   of the whole chat, so the overall card names what it describes.
  * @returns {object[]}
  */
-function buildCards(usage, prices) {
+function buildCards(usage, prices, { filtered = false } = {}) {
     const cards = [];
     // A chat whose only requests failed still has rows in the table, so the
     // overall card reports them: the numbers above the table never leave a row
     // unaccounted for.
     if (toCount(usage.counters.requests) + toCount(usage.counters.excludedRequests) > 0) {
-        cards.push(buildCard('all', usage, prices));
+        cards.push(buildCard('all', usage, prices, { filtered }));
     }
 
     for (const origin of ORIGIN_ORDER) {
@@ -214,9 +307,10 @@ function buildCards(usage, prices) {
  * @param {string} scope 'all' or an origin
  * @param {{counters: object, cost: object, saving: object}} summary
  * @param {import('../src/prices.js').UsagePriceTable|null} prices
+ * @param {{filtered?: boolean}} [options]
  * @returns {object}
  */
-function buildCard(scope, summary, prices) {
+function buildCard(scope, summary, prices, { filtered = false } = {}) {
     const counters = summary.counters;
     const requests = toCount(counters.requests);
     const excluded = toCount(counters.excludedRequests);
@@ -238,7 +332,7 @@ function buildCard(scope, summary, prices) {
 
     return {
         scope,
-        title: scope === 'all' ? 'This chat' : ORIGIN_CARD_TITLES[scope],
+        title: scope === 'all' ? (filtered ? 'This run' : 'This chat') : ORIGIN_CARD_TITLES[scope],
         requestsLabel: head,
         detailLabel: stopped,
         // A card with no money says why: a metric showing a placeholder leaves
@@ -476,6 +570,11 @@ function buildRow(record, prices) {
         statusLabel: STATUS_LABELS[record.status] ?? PLACEHOLDER,
         sourceLabel: SOURCE_LABELS[record.usageSource] ?? SOURCE_LABELS.unavailable,
     };
+}
+
+function formatRunTime(timestamp) {
+    if (!Number.isFinite(timestamp)) return PLACEHOLDER;
+    return RUN_TIME_FORMAT.format(new Date(timestamp));
 }
 
 function formatTime(timestamp) {

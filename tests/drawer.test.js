@@ -12,7 +12,9 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 import { mountSpendbookPanel } from '../ui/panel.js';
 import { readSpendbookSettings, setTrackingEnabled } from '../src/settings.js';
+import { addRecordToUsageArchive, createUsageArchive } from '../src/stats.js';
 import { ACME_PRICES, ACME_PRICED_ROW } from './fixtures/prices.js';
+import { CHAT_RUNS as RUNS } from './fixtures/runs.js';
 
 const templateHtml = readFileSync(join(process.cwd(), 'settings.html'), 'utf8');
 
@@ -23,6 +25,7 @@ function mount({
     onResetChat = () => {},
     onResetAllTime = () => {},
     onPricesChange = () => {},
+    onStartRun = () => null,
     confirmReset = () => true,
 } = {}) {
     document.body.innerHTML = '<div id="extensions_settings2"></div>';
@@ -36,6 +39,7 @@ function mount({
         onResetChat,
         onResetAllTime,
         onPricesChange,
+        onStartRun,
         confirmReset,
     });
     return { container, panel };
@@ -559,5 +563,190 @@ describe('Spendbook drawer — cost', () => {
 
         expect(onPricesChange.mock.calls[0][0].currency).toBe('EUR');
         expect(container.querySelector('.spendbook-cell-cost').textContent.startsWith('€')).toBe(true);
+    });
+});
+
+describe('Spendbook drawer — measurement runs', () => {
+    beforeEach(() => {
+        document.body.innerHTML = '';
+    });
+
+    function runRows(container) {
+        return [...container.querySelectorAll('.spendbook-rows tr')].map((tr) => tr.dataset.recordId);
+    }
+
+    it('lists every run, offers all runs and names the current one', () => {
+        const { container } = mount({
+            settings: { trackingEnabled: true },
+            getSnapshot: () => ({
+                chatId: 'chat-a',
+                records: [pricedRow({ recordId: 'r-1', runId: 'run-2' })],
+                trackingEnabled: true,
+                runs: RUNS,
+            }),
+        });
+
+        const select = container.querySelector('.spendbook-run-filter');
+        expect([...select.options].map((option) => option.value)).toEqual(['', 'run-2', 'run-1']);
+        expect([...select.options].map((option) => option.textContent)[1]).toMatch(/^after · /);
+        expect(select.value).toBe('');
+        expect(container.querySelector('.spendbook-run-current').textContent).toMatch(/^Current run: after · started /);
+    });
+
+    it('offers all runs before any run exists', () => {
+        const { container } = mount({
+            settings: { trackingEnabled: true },
+            getSnapshot: () => ({
+                chatId: 'chat-a',
+                records: [pricedRow({ recordId: 'r-1' })],
+                trackingEnabled: true,
+                runs: { runs: [], currentRunId: null },
+            }),
+        });
+
+        const select = container.querySelector('.spendbook-run-filter');
+        expect([...select.options].map((option) => option.textContent)).toEqual(['All runs']);
+        expect(select.disabled).toBe(true);
+        expect(container.querySelector('.spendbook-run-current').textContent).toBe(
+            'No run started yet — requests belong to no run until you start one.',
+        );
+    });
+
+    it('starts a labelled run from the bar without changing what is shown', () => {
+        let snapshot = {
+            chatId: 'chat-a',
+            records: [pricedRow({ recordId: 'r-old' })],
+            trackingEnabled: true,
+            runs: { runs: [], currentRunId: null },
+        };
+        const onStartRun = vi.fn((label) => {
+            const run = { runId: 'run-new', label: label || 'Run 1', startedAt: 1_700_000_500_000 };
+            snapshot = {
+                ...snapshot,
+                runs: { runs: [run], currentRunId: run.runId },
+            };
+            return run;
+        });
+        const { container } = mount({
+            settings: { trackingEnabled: true },
+            getSnapshot: () => snapshot,
+            onStartRun,
+        });
+
+        const input = container.querySelector('.spendbook-run-label');
+        input.value = 'batch 30';
+        container.querySelector('.spendbook-run-start').click();
+
+        expect(onStartRun).toHaveBeenCalledWith('batch 30');
+        expect(input.value).toBe('');
+        // The view stays where it was; the bar lists and names the new run.
+        expect(container.querySelector('.spendbook-run-filter').value).toBe('');
+        expect([...container.querySelectorAll('.spendbook-run-filter option')]).toHaveLength(2);
+        expect(container.querySelector('.spendbook-run-current').textContent).toMatch(/^Current run: batch 30/);
+        expect(runRows(container)).toEqual(['r-old']);
+    });
+
+    it('keeps a typed label when no run could be started', () => {
+        const onStartRun = vi.fn(() => null);
+        const { container } = mount({
+            settings: { trackingEnabled: true },
+            getSnapshot: () => ({
+                chatId: 'chat-a',
+                records: [pricedRow({ recordId: 'r-1' })],
+                trackingEnabled: true,
+                runs: { runs: [], currentRunId: null },
+            }),
+            onStartRun,
+        });
+
+        const input = container.querySelector('.spendbook-run-label');
+        input.value = 'batch 30';
+        container.querySelector('.spendbook-run-start').click();
+
+        expect(input.value).toBe('batch 30');
+    });
+
+    it('narrows the table to the selected run and restores every run', () => {
+        const { container } = mount({
+            settings: { trackingEnabled: true },
+            getSnapshot: () => ({
+                chatId: 'chat-a',
+                records: [
+                    pricedRow({ recordId: 'r-run2', runId: 'run-2' }),
+                    pricedRow({ recordId: 'r-run1', runId: 'run-1' }),
+                    pricedRow({ recordId: 'r-before' }),
+                ],
+                trackingEnabled: true,
+                runs: RUNS,
+            }),
+        });
+        const select = container.querySelector('.spendbook-run-filter');
+        expect(runRows(container)).toEqual(['r-run2', 'r-run1', 'r-before']);
+
+        select.value = 'run-1';
+        select.dispatchEvent(new Event('change'));
+
+        expect(runRows(container)).toEqual(['r-run1']);
+        // The bar keeps listing the run that is not being shown.
+        expect([...container.querySelectorAll('.spendbook-run-filter option')]).toHaveLength(3);
+
+        container.querySelector('.spendbook-run-filter').value = '';
+        container.querySelector('.spendbook-run-filter').dispatchEvent(new Event('change'));
+
+        expect(runRows(container)).toEqual(['r-run2', 'r-run1', 'r-before']);
+    });
+
+    it('leaves the folded counters out of a run and says so', () => {
+        const archive = createUsageArchive();
+        addRecordToUsageArchive(archive, pricedRow({ recordId: 'r-folded' }));
+        const { container } = mount({
+            settings: { trackingEnabled: true },
+            getSnapshot: () => ({
+                chatId: 'chat-a',
+                records: [pricedRow({ recordId: 'r-run1', runId: 'run-1', promptTokens: 500, hitTokens: 100 })],
+                trackingEnabled: true,
+                archive,
+                retention: { limit: 500, retained: 1, total: 2 },
+                runs: RUNS,
+            }),
+        });
+        const select = container.querySelector('.spendbook-run-filter');
+        select.value = 'run-1';
+        select.dispatchEvent(new Event('change'));
+
+        // The folded copy of the fixture row would add 1,200 prompt tokens.
+        expect(container.querySelector('.spendbook-metric-prompt dd').textContent).toBe('500');
+        expect(container.querySelector('.spendbook-retention').textContent).toBe(
+            'Retention: this view covers one run — 1 folded row cannot be attributed to a run, so it is left out.',
+        );
+    });
+
+    it('resets the filter when another chat opens', () => {
+        let snapshot = {
+            chatId: 'chat-a',
+            records: [pricedRow({ recordId: 'r-run1', runId: 'run-1' }), pricedRow({ recordId: 'r-before' })],
+            trackingEnabled: true,
+            runs: RUNS,
+        };
+        const { container, panel } = mount({
+            settings: { trackingEnabled: true },
+            getSnapshot: () => snapshot,
+        });
+        const select = container.querySelector('.spendbook-run-filter');
+        select.value = 'run-1';
+        select.dispatchEvent(new Event('change'));
+        expect(runRows(container)).toEqual(['r-run1']);
+
+        snapshot = {
+            chatId: 'chat-b',
+            records: [pricedRow({ recordId: 'r-other-chat' })],
+            trackingEnabled: true,
+            runs: { runs: [], currentRunId: null },
+        };
+        panel.refresh();
+
+        expect(container.querySelector('.spendbook-run-filter').value).toBe('');
+        expect(runRows(container)).toEqual(['r-other-chat']);
+        expect(container.querySelector('.spendbook-run-current').textContent).toMatch(/^No run started yet/);
     });
 });

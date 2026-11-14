@@ -42,8 +42,12 @@ function sseResponse(parts, { status = 200, contentType = 'text/event-stream' } 
 /**
  * Wires the real observer, origin and ledger over a fake fetch, exactly as the
  * entry module does. Returns the records the ledger holds.
+ *
+ * @param {{enabled?: boolean, observerOptions?: object, responseGate?: Promise|null}} [options]
+ *   `responseGate` holds the fake fetch until resolved, so a test can act while
+ *   a request is in flight.
  */
-function createPipeline({ enabled = true, observerOptions = {} } = {}) {
+function createPipeline({ enabled = true, observerOptions = {}, responseGate = null } = {}) {
     const chatId = 'chat-a';
     const metadata = {};
     let enabledNow = enabled;
@@ -54,8 +58,10 @@ function createPipeline({ enabled = true, observerOptions = {} } = {}) {
         usage: { prompt_tokens: 100, completion_tokens: 25, total_tokens: 125 },
     });
 
+    const gate = responseGate ? Promise.resolve(responseGate) : null;
     const target = {
         fetch: vi.fn(async () => {
+            if (gate) await gate;
             if (failure) throw failure;
             return response;
         }),
@@ -72,6 +78,7 @@ function createPipeline({ enabled = true, observerOptions = {} } = {}) {
         target,
         isEnabled: () => enabledNow,
         getChatId: () => chatId,
+        getRunId: () => ledger.currentRunIdFor(chatId),
         handleRecord: (record) => ledger.add(record),
         ...observerOptions,
     });
@@ -164,6 +171,47 @@ describe('Spendbook observer pipeline', () => {
             ['story', null],
             ['internal', 'ExampleFeature'],
         ]);
+    });
+
+    it('stamps a request with the run that was open when it was sent', async () => {
+        const pipeline = createPipeline();
+
+        const first = await send(pipeline);
+        await first.json();
+        await waitForRecords(pipeline, 1);
+        expect(pipeline.records()[0].runId).toBeNull();
+
+        const run = pipeline.ledger.startRun({ label: 'batch 30' });
+        pipeline.setResponse(jsonResponse({
+            id: 'resp-2',
+            model: 'model-a',
+            usage: { prompt_tokens: 100, completion_tokens: 25, total_tokens: 125 },
+        }));
+        const second = await send(pipeline);
+        await second.json();
+        await waitForRecords(pipeline, 2);
+
+        expect(pipeline.records()[0].runId).toBe(run.runId);
+        // The rows captured before the first run belong to no run.
+        expect(pipeline.records()[1].runId).toBeNull();
+    });
+
+    it('keeps the run that was open at send time when another starts before the capture', async () => {
+        let release;
+        const gate = new Promise((resolve) => { release = resolve; });
+        const pipeline = createPipeline({ responseGate: gate });
+        const first = pipeline.ledger.startRun({ label: 'before' });
+
+        const pending = send(pipeline);
+        await vi.waitFor(() => expect(pipeline.originalFetch).toHaveBeenCalled());
+        pipeline.ledger.startRun({ label: 'after' });
+        release();
+
+        const response = await pending;
+        await response.json();
+        await waitForRecords(pipeline, 1);
+
+        expect(pipeline.records()[0].runId).toBe(first.runId);
     });
 
     it('records a quiet generation as quiet', async () => {

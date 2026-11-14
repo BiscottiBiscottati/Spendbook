@@ -13,6 +13,21 @@
         <div class="spendbook-panel">
             <div class="spendbook-health" role="status"></div>
             <div class="spendbook-alltime"></div>
+            <section class="spendbook-runs" role="group" aria-label="Measurement runs">
+                <div class="spendbook-run-current"></div>
+                <div class="spendbook-run-controls">
+                    <input type="text" class="text_pole spendbook-run-label" aria-label="Label for the measurement run" placeholder="Run label (optional)">
+                    <button type="button" class="menu_button spendbook-run-start">Start run</button>
+                    <label class="spendbook-run-filter-label">
+                        Show
+                        <select class="text_pole spendbook-run-filter" aria-label="Show one measurement run"></select>
+                    </label>
+                </div>
+                <small class="spendbook-runs-hint">
+                    Start a run before you change a setting, then filter to it to compare.
+                    Requests sent before the first run stay under all runs.
+                </small>
+            </section>
             <div class="spendbook-cards" role="group" aria-label="Usage summary"></div>
             <div class="spendbook-empty"></div>
             <div class="spendbook-table-wrap">

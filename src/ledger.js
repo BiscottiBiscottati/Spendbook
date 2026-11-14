@@ -18,8 +18,15 @@
  * Lifecycle: deleting a chat removes its state, pending copy and bucket;
  * renaming moves them; a namespace whose owner id is not the open chat is a copy
  * (a branch or a manual copy) and is discarded, so the chat starts clean.
+ *
+ * Measurement runs mark windows of one chat: a run keeps its id, its label and
+ * the time it started, and the newest one is current until another starts. A
+ * record carries the id of the run that was open when its request was sent, so a
+ * run can be looked at on its own; a record sent before the first run carries
+ * none and belongs to "all runs".
  */
 
+import { createUsageId } from './ids.js';
 import {
     addRecordToUsageAccumulator,
     addRecordToUsageArchive,
@@ -116,12 +123,7 @@ export class UsageLedger {
         // the row from the pending copy without ever counting it.
         this.#persistAllTime();
 
-        if (this.#isActiveChat(chatId) && this.#getMetadata()) {
-            state.ownerChatId = chatId;
-            this.#writeNamespace(state);
-        }
-        this.#stagePendingBackup(chatId, state);
-        this.#scheduleSave(chatId);
+        this.#commit(chatId, state);
     }
 
     /**
@@ -132,6 +134,61 @@ export class UsageLedger {
      */
     recordsFor(chatId) {
         return [...(this.#byChat.get(chatKey(chatId))?.records ?? [])].reverse();
+    }
+
+    /**
+     * Starts a measurement run in one chat: a labelled marker stamped on every
+     * request sent from now on. An earlier run stays listed, and starting a run
+     * again switches the current one rather than replacing it.
+     *
+     * @param {object} [options]
+     * @param {string|null} [options.chatId] Chat the run belongs to; the open
+     *   chat by default.
+     * @param {string|null} [options.label] What the user is measuring; an empty
+     *   label falls back to the run's ordinal.
+     * @returns {{runId: string, label: string, startedAt: number}|null} The run,
+     *   or null when there is no chat to record it in.
+     */
+    startRun({ chatId = this.#getChatId(), label = null } = {}) {
+        const key = chatKey(chatId);
+        if (!key) return null;
+        const state = this.#ensureState(chatId);
+        const run = {
+            runId: createUsageId('spendbook-run'),
+            label: normalizeRunLabel(label, state.runs.length + 1),
+            startedAt: this.#now(),
+        };
+
+        state.runs.push(run);
+        state.currentRunId = run.runId;
+        state.revision += 1;
+        this.#commit(chatId, state);
+        return { ...run };
+    }
+
+    /**
+     * One chat's measurement runs, newest first, and which one is current.
+     *
+     * @param {string|null} chatId
+     * @returns {{runs: Array<{runId: string, label: string, startedAt: number|null}>, currentRunId: string|null}}
+     */
+    runsFor(chatId) {
+        const state = this.#byChat.get(chatKey(chatId));
+        return {
+            runs: [...(state?.runs ?? [])].reverse().map((run) => ({ ...run })),
+            currentRunId: state?.currentRunId ?? null,
+        };
+    }
+
+    /**
+     * The run a request sent in this chat right now belongs to, read when the
+     * request is sent and never at capture time.
+     *
+     * @param {string|null} chatId
+     * @returns {string|null}
+     */
+    currentRunIdFor(chatId) {
+        return this.#byChat.get(chatKey(chatId))?.currentRunId ?? null;
     }
 
     /**
@@ -469,6 +526,23 @@ export class UsageLedger {
         addRecordToUsageAccumulator(this.#allTime.chats[bucketKey], record);
     }
 
+    /**
+     * Writes a changed chat state out the way every mutation must: through the
+     * live metadata while the chat is open, into the pending copy, and onto the
+     * debounced save.
+     *
+     * @param {string|null} chatId
+     * @param {object} state
+     */
+    #commit(chatId, state) {
+        if (this.#isActiveChat(chatId) && this.#getMetadata()) {
+            state.ownerChatId = chatId;
+            this.#writeNamespace(state);
+        }
+        this.#stagePendingBackup(chatId, state);
+        this.#scheduleSave(chatId);
+    }
+
     #writeNamespace(state) {
         const metadata = this.#getMetadata();
         if (!metadata) return;
@@ -533,17 +607,30 @@ export class UsageLedger {
         const base = (right.revision ?? 0) > (left.revision ?? 0) ? right : left;
         const other = base === left ? right : left;
         const state = stateFromNamespace(base);
-        this.#mergeRecordsInto(state, other.records);
-        state.archived = mergeUsageArchives(state.archived, other.archived);
+        this.#mergeState(state, other);
         state.revision = Math.max(left.revision ?? 0, right.revision ?? 0);
         return serializeState(state);
     }
 
     #mergeMovedState(target, source) {
-        this.#mergeRecordsInto(target, source.records);
-        target.archived = mergeUsageArchives(target.archived, source.archived);
+        this.#mergeState(target, source);
         target.ownerChatId = source.ownerChatId;
         target.revision = Math.max(target.revision, source.revision);
+    }
+
+    /**
+     * Folds one chat state into another: rows, folded counters and runs. The
+     * current run is the later-started of the two, because starting a run is the
+     * only thing that ever changes it.
+     *
+     * @param {object} target
+     * @param {object} source
+     */
+    #mergeState(target, source) {
+        this.#mergeRecordsInto(target, source.records);
+        target.archived = mergeUsageArchives(target.archived, source.archived);
+        target.runs = mergeRuns(target.runs, source.runs);
+        target.currentRunId = mergeCurrentRunId(target.currentRunId, source.currentRunId, target.runs);
     }
 
     #rememberRename(oldId, newId) {
@@ -645,15 +732,20 @@ function createChatState(chatId) {
         ownerChatId: chatId ?? null,
         records: [],
         archived: createUsageArchive(),
+        runs: [],
+        currentRunId: null,
         revision: 0,
     };
 }
 
 function stateFromNamespace(namespace) {
+    const runs = normalizeRuns(namespace?.runs);
     return {
         ownerChatId: typeof namespace?.ownerChatId === 'string' ? namespace.ownerChatId : null,
         records: Array.isArray(namespace?.records) ? [...namespace.records] : [],
         archived: normalizeUsageArchive(namespace?.archived),
+        runs,
+        currentRunId: normalizeCurrentRunId(namespace?.currentRunId, runs),
         revision: Number.isFinite(namespace?.revision) ? namespace.revision : 0,
     };
 }
@@ -665,17 +757,22 @@ function serializeState(state) {
         revision: state.revision ?? 0,
         records: [...state.records],
         archived: normalizeUsageArchive(state.archived),
+        runs: (state.runs ?? []).map((run) => ({ ...run })),
+        currentRunId: state.currentRunId ?? null,
     };
 }
 
 function normalizeNamespace(raw) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
     if (!Array.isArray(raw.records)) return null;
+    const runs = normalizeRuns(raw.runs);
     return {
         ownerChatId: typeof raw.ownerChatId === 'string' ? raw.ownerChatId : null,
         revision: Number.isFinite(raw.revision) ? raw.revision : 0,
         records: raw.records.filter((entry) => entry && typeof entry === 'object'),
         archived: normalizeUsageArchive(raw.archived),
+        runs,
+        currentRunId: normalizeCurrentRunId(raw.currentRunId, runs),
     };
 }
 
@@ -762,6 +859,90 @@ function renamedAncestorIds(chatId, renames) {
  */
 function chatKey(chatId) {
     return typeof chatId === 'string' && chatId ? chatId : null;
+}
+
+function mergeRuns(left, right) {
+    return runsById([...(left ?? []), ...(right ?? [])])
+        .sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0));
+}
+
+/**
+ * The later-started of two current run ids, so a merge cannot keep an older run
+ * current than one of the two sides had. A side that names no run contributes
+ * nothing; both empty stays empty.
+ *
+ * @param {string|null} leftId
+ * @param {string|null} rightId
+ * @param {Array<{runId: string, startedAt: number|null}>} runs
+ * @returns {string|null}
+ */
+function mergeCurrentRunId(leftId, rightId, runs) {
+    const candidates = [leftId, rightId]
+        .map((runId) => runs.find((run) => run.runId === runId))
+        .filter(Boolean);
+    if (candidates.length === 0) return null;
+    return candidates.reduce((newest, run) => (
+        (run.startedAt ?? 0) > (newest.startedAt ?? 0) ? run : newest
+    )).runId;
+}
+
+/**
+ * The runs a namespace carries, in the order they started. A persisted entry
+ * without an id cannot be attributed to a request, so it is dropped rather than
+ * shown as a filter that matches nothing. Labels go through the same normaliser
+ * as a new run's, so a hand-edited chat file cannot smuggle in a label the run
+ * bar cannot render on one line.
+ *
+ * @param {unknown} raw
+ * @returns {Array<{runId: string, label: string, startedAt: number|null}>}
+ */
+function normalizeRuns(raw) {
+    if (!Array.isArray(raw)) return [];
+    const runs = [];
+    for (const entry of raw) {
+        if (!entry || typeof entry !== 'object') continue;
+        if (typeof entry.runId !== 'string' || !entry.runId) continue;
+        runs.push({
+            runId: entry.runId,
+            label: normalizeRunLabel(entry.label, runs.length + 1),
+            startedAt: Number.isFinite(entry.startedAt) ? entry.startedAt : null,
+        });
+    }
+    return runsById(runs);
+}
+
+/**
+ * One entry per run id, first occurrence wins.
+ *
+ * @param {Array<{runId?: string}>} runs
+ * @returns {Array<object>}
+ */
+function runsById(runs) {
+    const byId = new Map();
+    for (const run of runs) {
+        if (!run?.runId || byId.has(run.runId)) continue;
+        byId.set(run.runId, run);
+    }
+    return [...byId.values()];
+}
+
+/**
+ * A run label as it is persisted: trimmed and single-spaced, so a pasted label
+ * does not break the run bar's line. An empty one is named by its ordinal.
+ *
+ * @param {unknown} label
+ * @param {number} ordinal 1 for the chat's first run
+ * @returns {string}
+ */
+function normalizeRunLabel(label, ordinal) {
+    const text = typeof label === 'string' ? label.trim().replace(/\s+/g, ' ') : '';
+    if (!text) return `Run ${ordinal}`;
+    return text.length > 80 ? text.slice(0, 80) : text;
+}
+
+function normalizeCurrentRunId(value, runs) {
+    if (typeof value !== 'string' || !value) return null;
+    return runs.some((run) => run.runId === value) ? value : null;
 }
 
 function recordKey(record) {

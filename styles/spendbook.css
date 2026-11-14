@@ -27,6 +27,51 @@
     font-size: 0.9em;
 }
 
+/* The run bar: what the user is measuring, and the filter that narrows every
+   results surface without hiding the other runs. */
+.spendbook-run-current {
+    margin: 6px 0 2px;
+    color: var(--SmartThemeEmColor);
+    font-size: 0.9em;
+}
+
+.spendbook-run-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
+
+.spendbook-run-label {
+    width: auto;
+    min-width: 12ch;
+}
+
+/* ST's .menu_button is min-content wide for icon buttons; this carries words. */
+.spendbook-run-start {
+    width: auto;
+    white-space: nowrap;
+}
+
+.spendbook-run-filter-label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.9em;
+}
+
+.spendbook-run-filter {
+    width: auto;
+    max-width: 22ch;
+}
+
+.spendbook-runs-hint {
+    display: block;
+    margin: 4px 0 6px;
+    color: var(--SmartThemeEmColor);
+    font-size: 0.85em;
+}
+
 /* One card per scope above the table; they wrap instead of shrinking to one
    unreadable column. */
 .spendbook-cards {
