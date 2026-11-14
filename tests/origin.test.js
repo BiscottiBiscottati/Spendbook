@@ -37,6 +37,15 @@ describe('Spendbook origin attribution', () => {
         expect(resolveUsageOrigin({ [MARK]: {} })).toEqual({ origin: 'internal', label: null });
     });
 
+    // The mark's documented value is `{ label: string | null }`, but a host may
+    // write the symbol itself and skip the helper that normalizes. The label
+    // reaches the drawer and the export, so the reader normalizes too.
+    it('ignores a hand-written label that is not a non-empty string', () => {
+        for (const label of ['', 42, {}, ['a'], true]) {
+            expect(resolveUsageOrigin({ [MARK]: { label } })).toEqual({ origin: 'internal', label: null });
+        }
+    });
+
     it('records a quiet generation whose result is handed back as quiet', () => {
         noteGenerationStarted('quiet');
 

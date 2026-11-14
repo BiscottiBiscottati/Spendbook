@@ -84,7 +84,13 @@ export function noteGenerationEnded() {
 export function resolveUsageOrigin(init = null) {
     const marked = init && typeof init === 'object' ? init[INTERNAL_REQUEST_MARK] : null;
     if (marked) {
-        return { origin: USAGE_ORIGINS.INTERNAL, label: marked.label ?? null };
+        // The mark's documented value is `{ label: string|null }`, but a host may
+        // write the symbol itself and never go through markInternalRequest. The
+        // label reaches the drawer and the export, so normalize it here too.
+        return {
+            origin: USAGE_ORIGINS.INTERNAL,
+            label: typeof marked.label === 'string' && marked.label ? marked.label : null,
+        };
     }
     if (!_generation) {
         return { origin: USAGE_ORIGINS.INTERNAL, label: null };
