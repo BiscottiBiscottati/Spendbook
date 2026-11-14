@@ -8,7 +8,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import { mountSpendbookPanel } from '../ui/panel.js';
 import { readSpendbookSettings, setTrackingEnabled } from '../src/settings.js';
@@ -26,6 +26,8 @@ function mount({
     onResetAllTime = () => {},
     onPricesChange = () => {},
     onStartRun = () => null,
+    onExport = () => null,
+    onIncludeChatNamesChange = () => {},
     confirmReset = () => true,
 } = {}) {
     document.body.innerHTML = '<div id="extensions_settings2"></div>';
@@ -40,6 +42,8 @@ function mount({
         onResetAllTime,
         onPricesChange,
         onStartRun,
+        onExport,
+        onIncludeChatNamesChange,
         confirmReset,
     });
     return { container, panel };
@@ -903,5 +907,100 @@ describe('Spendbook drawer — configuration row sources', () => {
         const costCell = configRow.querySelector('.spendbook-configuration-cell-cost');
         expect(costCell.textContent).toBe('—');
         expect(costCell.dataset.source).toBe('unavailable');
+    });
+});
+
+describe('Spendbook drawer — export', () => {
+    beforeEach(() => {
+        document.body.innerHTML = '';
+    });
+
+    it('offers one export button and leaves the chat-name opt-in off by default', () => {
+        const { container } = mount();
+
+        const button = container.querySelector('.spendbook-export-button');
+        expect(button).not.toBeNull();
+        expect(button.textContent).toBe('Export JSON');
+
+        const optIn = container.querySelector('#spendbook_include_chat_names');
+        expect(optIn).not.toBeNull();
+        expect(optIn.checked).toBe(false);
+        expect(optIn.closest('label').textContent).toContain('chat’s name');
+    });
+
+    it('shows the stored opt-in', () => {
+        const { container } = mount({ settings: { includeChatNames: true } });
+
+        expect(container.querySelector('#spendbook_include_chat_names').checked).toBe(true);
+    });
+
+    it('persists the opt-in when the user flips it, without repainting the drawer', () => {
+        const onIncludeChatNamesChange = vi.fn();
+        const { container } = mount({ onIncludeChatNamesChange });
+
+        const optIn = container.querySelector('#spendbook_include_chat_names');
+        optIn.checked = true;
+        optIn.dispatchEvent(new Event('change'));
+
+        expect(onIncludeChatNamesChange).toHaveBeenCalledWith(true);
+    });
+
+    it('asks for one export per click', () => {
+        const onExport = vi.fn(() => ({ fileName: 'spendbook-usage-x.json', content: '{}' }));
+        const { container } = mount({ onExport });
+
+        container.querySelector('.spendbook-export-button').click();
+        container.querySelector('.spendbook-export-button').click();
+
+        expect(onExport).toHaveBeenCalledTimes(2);
+    });
+
+    it('saves the file the entry module built, under its own name', () => {
+        const clicked = [];
+        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function click() {
+            clicked.push({ href: this.href, download: this.download });
+        });
+        globalThis.URL.createObjectURL = vi.fn(() => 'blob:spendbook');
+        const revokeObjectURL = vi.fn();
+        globalThis.URL.revokeObjectURL = revokeObjectURL;
+        vi.useFakeTimers();
+
+        const { container } = mount({
+            onExport: () => ({
+                fileName: 'spendbook-usage-Alice-20261114-123456.json',
+                content: '{"kind":"spendbook-usage-export"}',
+            }),
+        });
+        container.querySelector('.spendbook-export-button').click();
+
+        expect(clicked).toEqual([{
+            href: 'blob:spendbook',
+            download: 'spendbook-usage-Alice-20261114-123456.json',
+        }]);
+        expect(document.querySelector('a')).toBeNull();
+        // The browser copies the blob asynchronously, so the URL outlives the click.
+        expect(revokeObjectURL).not.toHaveBeenCalled();
+        vi.advanceTimersByTime(1000);
+        expect(revokeObjectURL).toHaveBeenCalledWith('blob:spendbook');
+    });
+
+    it('does nothing when the browser cannot create a download', () => {
+        const clicked = [];
+        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => clicked.push('clicked'));
+
+        const { container } = mount({
+            onExport: () => ({ fileName: 'spendbook-usage-x.json', content: '{}' }),
+        });
+        container.querySelector('.spendbook-export-button').click();
+
+        // jsdom has no object-URL support, so there is nowhere to save the file.
+        expect(clicked).toEqual([]);
+    });
+
+    afterEach(() => {
+        vi.restoreAllMocks();
+        vi.useRealTimers();
+        delete globalThis.URL.createObjectURL;
+        delete globalThis.URL.revokeObjectURL;
     });
 });

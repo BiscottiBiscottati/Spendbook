@@ -21,8 +21,11 @@ the first release. The decision and its reasoning are in
   comparison runs, and a flag for requests that break the prompt prefix.
 - Compare labelled configurations side by side — requests, tokens, cost and
   hit rate per configuration label a host extension set.
-- Export the ledger as JSON, with **no chat identifiers** unless you ask for chat
-  names.
+- Export one versioned JSON file for a bug report: this chat's records, its
+  measurement runs, the counters for the rows the retention cap folded and the
+  all-time totals — a fixed field list, with **no chat identifiers**. The name
+  inside the file is opt-in; the download is always named after the chat so you
+  can tell two exports apart.
 
 ## What it will not do
 

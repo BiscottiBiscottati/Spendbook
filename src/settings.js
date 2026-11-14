@@ -75,3 +75,18 @@ export function setPriceTable(extensionSettings, prices) {
     }
     extensionSettings[SETTINGS_NAMESPACE].prices = normalizePriceTable(prices);
 }
+
+/**
+ * Set whether exports may carry the open chat's name. Off by default, and the
+ * only opt-in: everything else about the export is fixed.
+ * @param {object} extensionSettings SillyTavern's shared extension settings object
+ * @param {boolean} includeChatNames
+ * @returns {boolean} The stored value
+ */
+export function setIncludeChatNames(extensionSettings, includeChatNames) {
+    if (!isPlainObject(extensionSettings[SETTINGS_NAMESPACE])) {
+        extensionSettings[SETTINGS_NAMESPACE] = {};
+    }
+    extensionSettings[SETTINGS_NAMESPACE].includeChatNames = Boolean(includeChatNames);
+    return extensionSettings[SETTINGS_NAMESPACE].includeChatNames;
+}

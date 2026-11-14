@@ -10,13 +10,19 @@
 import { eventSource, event_types, saveMetadata, saveSettingsDebounced } from '../../../../script.js';
 import { extension_settings, getContext, renderExtensionTemplateAsync } from '../../../extensions.js';
 import { getSanitizedFilename } from '../../../utils.js';
-import { readSpendbookSettings, setPriceTable, setTrackingEnabled } from './src/settings.js';
+import {
+    readSpendbookSettings,
+    setIncludeChatNames,
+    setPriceTable,
+    setTrackingEnabled,
+} from './src/settings.js';
 import { UsageLedger } from './src/ledger.js';
 import { createMessageTokenEstimator, createPromptTokenEstimator } from './src/estimator.js';
 import { getUsageObserverHealth, installUsageObserver } from './src/observer.js';
 import { noteGenerationEnded, noteGenerationStarted } from './src/origin.js';
 import { getConfigurationLabel } from './src/configuration.js';
 import { publishSpendbookHost } from './src/host.js';
+import { buildUsageExport, usageExportFileName } from './src/export.js';
 import { mountSpendbookPanel } from './ui/panel.js';
 
 const EXTENSION_FOLDER = 'third-party/Spendbook';
@@ -97,6 +103,29 @@ function installObserver() {
 }
 
 /**
+ * One file for a bug report: the open chat's records, its runs, the counters of
+ * the rows the retention cap folded and the all-time totals. The export module
+ * owns the published shape and the name opt-in, and the ledger owns the snapshot
+ * shape; here they are only brought together, and the drawer does the saving.
+ *
+ * @returns {{fileName: string, content: string}}
+ */
+function createChatExport() {
+    const now = Date.now();
+    const settings = readSettings();
+    const chatContext = getContext();
+    const snapshot = ledger.exportSnapshotFor(getChatId());
+    return {
+        fileName: usageExportFileName({ now, chatContext }),
+        content: JSON.stringify(
+            buildUsageExport({ now, chatContext, includeChatNames: settings.includeChatNames, snapshot }),
+            null,
+            2,
+        ),
+    };
+}
+
+/**
  * Render the drawer template and mount it in the extensions settings panel.
  * @returns {Promise<void>}
  */
@@ -142,6 +171,11 @@ async function mountSettingsDrawer() {
             saveSettingsDebounced();
         },
         onStartRun: (label) => ledger.startRun({ chatId: getChatId(), label }),
+        onExport: () => createChatExport(),
+        onIncludeChatNamesChange: (includeChatNames) => {
+            setIncludeChatNames(extension_settings, includeChatNames);
+            saveSettingsDebounced();
+        },
     });
     refreshPanel = panel.refresh;
 }

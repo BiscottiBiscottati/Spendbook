@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { readSpendbookSettings, setPriceTable, setTrackingEnabled } from '../src/settings.js';
+import { readSpendbookSettings, setIncludeChatNames, setPriceTable, setTrackingEnabled } from '../src/settings.js';
 
 describe('Spendbook settings', () => {
     it('reads defaults for a fresh install, leaving the shared settings object alone', () => {
@@ -52,6 +52,24 @@ describe('Spendbook settings', () => {
         expect(extensionSettings.otherExtension).toBe(other);
         expect(Object.keys(extensionSettings).sort()).toEqual(['otherExtension', 'spendbook']);
         expect(readSpendbookSettings(extensionSettings).trackingEnabled).toBe(true);
+    });
+
+    it('writes the chat-name opt-in into Spendbook’s namespace and reads it back', () => {
+        const extensionSettings = { otherExtension: { someSetting: true } };
+
+        setIncludeChatNames(extensionSettings, true);
+
+        expect(extensionSettings.spendbook).toEqual({ includeChatNames: true });
+        expect(extensionSettings.otherExtension).toEqual({ someSetting: true });
+        expect(readSpendbookSettings(extensionSettings).includeChatNames).toBe(true);
+
+        setIncludeChatNames(extensionSettings, false);
+
+        expect(readSpendbookSettings(extensionSettings).includeChatNames).toBe(false);
+    });
+
+    it('leaves the chat-name opt-in off for a settings blob saved before it existed', () => {
+        expect(readSpendbookSettings({ spendbook: { trackingEnabled: true } }).includeChatNames).toBe(false);
     });
 
     it('writes the price table into Spendbook’s namespace and reads it back normalized', () => {

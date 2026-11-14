@@ -236,6 +236,24 @@ export class UsageLedger {
     }
 
     /**
+     * One chat's state as the export publishes it: the retained rows, the runs,
+     * the counters of the rows the cap folded and the all-time totals. The
+     * ledger owns the snapshot shape so no caller assembles it by hand and reads
+     * one of the four wrong.
+     *
+     * @param {string|null} chatId
+     * @returns {{records: object[], runs: Array<object>, archived: object, allTime: object}}
+     */
+    exportSnapshotFor(chatId) {
+        return {
+            records: this.recordsFor(chatId),
+            runs: this.runsFor(chatId).runs,
+            archived: this.archivedFor(chatId),
+            allTime: this.allTimeForView(),
+        };
+    }
+
+    /**
      * The all-time aggregate across chats, plus how many chat buckets it holds.
      *
      * @returns {{totals: object, chats: number}}

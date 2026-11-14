@@ -13,6 +13,10 @@ import { buildUsageView } from './view.js';
 import { mountPriceEditor } from './price-editor.js';
 
 const TRACKING_TOGGLE_ID = 'spendbook_tracking_enabled';
+const INCLUDE_CHAT_NAMES_ID = 'spendbook_include_chat_names';
+
+/** How long a generated file's object URL stays alive after the click. */
+const REVOKE_DELAY_MS = 1000;
 
 const RESET_CHAT_MESSAGE = 'Clear Spendbook’s usage rows for this chat? '
     + 'The all-time totals lose this chat’s contribution. This cannot be undone.';
@@ -31,6 +35,8 @@ const RESET_ALL_TIME_MESSAGE = 'Clear Spendbook’s all-time totals? '
  * @param {() => void} [options.onResetAllTime] Clears the all-time totals after the user confirmed it
  * @param {(prices: import('../src/prices.js').UsagePriceTable) => void} [options.onPricesChange] Persists the edited price table
  * @param {(label: string) => (object|null)} [options.onStartRun] Starts a measurement run in the open chat and returns it
+ * @param {() => ({fileName: string, content: string}|null)} [options.onExport] Builds the JSON export of the open chat, which the panel saves; null means nothing was built
+ * @param {(includeChatNames: boolean) => void} [options.onIncludeChatNamesChange] Persists the chat-name opt-in
  * @param {(message: string) => boolean} [options.confirmReset] Asks the user; declining leaves the ledger untouched
  * @returns {{root: HTMLElement, refresh: () => void}} The mounted drawer and its repaint function
  */
@@ -44,6 +50,8 @@ export function mountSpendbookPanel({
     onResetAllTime = () => {},
     onPricesChange = () => {},
     onStartRun = () => null,
+    onExport = () => null,
+    onIncludeChatNamesChange = () => {},
     confirmReset = defaultConfirmReset,
 }) {
     container.insertAdjacentHTML('beforeend', html);
@@ -73,11 +81,14 @@ export function mountSpendbookPanel({
     const runFilter = root.querySelector('.spendbook-run-filter');
     const runLabelInput = root.querySelector('.spendbook-run-label');
     const runStartButton = root.querySelector('.spendbook-run-start');
+    const exportButton = root.querySelector('.spendbook-export-button');
+    const includeChatNamesInput = root.querySelector(`#${INCLUDE_CHAT_NAMES_ID}`);
     if (!healthLine || !cardsContainer || !configurationTable || !configurationRows
         || !allTimeLine || !emptyLine || !table || !rows
         || !retentionLine || !resetChatButton || !resetAllTimeButton
-        || !runCurrentLine || !runFilter || !runLabelInput || !runStartButton) {
-        throw new Error('Spendbook: the settings template has no usage table.');
+        || !runCurrentLine || !runFilter || !runLabelInput || !runStartButton
+        || !exportButton || !includeChatNamesInput) {
+        throw new Error('Spendbook: the settings template is incomplete.');
     }
 
     const readSnapshot = () => {
@@ -169,6 +180,17 @@ export function mountSpendbookPanel({
         selectedRunId = runFilter.value;
         refresh();
     });
+    // The export reads the setting when it is clicked, so the checkbox only has
+    // to write it; nothing on screen is repainted by turning the opt-in on.
+    includeChatNamesInput.checked = settings.includeChatNames === true;
+    includeChatNamesInput.addEventListener('change', () => {
+        onIncludeChatNamesChange(includeChatNamesInput.checked);
+    });
+    exportButton.addEventListener('click', () => {
+        const file = onExport();
+        if (file) saveJsonFile(file.fileName, file.content);
+    });
+
     runStartButton.addEventListener('click', () => {
         // Starting a run adds a window; it deliberately leaves the current view
         // alone, so the drawer never empties itself under the user's cursor. The
@@ -189,6 +211,40 @@ function createOption(value, text) {
     option.value = value;
     option.textContent = text;
     return option;
+}
+
+/**
+ * Saves a generated export through a Blob download. The object URL is revoked on
+ * a later task rather than in the same tick, because the browser copies the blob
+ * asynchronously and revoking immediately can cancel the download while the
+ * drawer reports success.
+ *
+ * @param {string} fileName
+ * @param {string} content
+ */
+function saveJsonFile(fileName, content) {
+    if (typeof Blob !== 'function'
+        || typeof globalThis.URL?.createObjectURL !== 'function'
+        || typeof document === 'undefined') {
+        return;
+    }
+
+    const url = globalThis.URL.createObjectURL(new Blob([content], { type: 'application/json' }));
+
+    try {
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = fileName;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+    } catch (error) {
+        // Nothing will consume the URL now; do not wait out the grace period.
+        globalThis.URL.revokeObjectURL?.(url);
+        throw error;
+    }
+
+    setTimeout(() => globalThis.URL.revokeObjectURL?.(url), REVOKE_DELAY_MS);
 }
 
 /**

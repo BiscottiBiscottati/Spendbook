@@ -79,6 +79,24 @@
             </div>
             <div class="spendbook-retention"></div>
         </div>
+        <section class="spendbook-export" role="group" aria-label="Export">
+            <div class="spendbook-export-title">Export</div>
+            <small class="spendbook-export-hint">
+                One versioned JSON file for a bug report: this chat’s records, its measurement
+                runs, the counters for the rows the retention cap folded, and the all-time
+                totals. It carries no chat identifier, no prompt text and no request body.
+            </small>
+            <label class="checkbox_label" for="spendbook_include_chat_names">
+                <input id="spendbook_include_chat_names" type="checkbox">
+                <span>Include this chat’s name in the export</span>
+            </label>
+            <small class="spendbook-export-optin-hint">
+                Off by default. When you turn it on, the character or group name of the open
+                chat is added to the file itself. The download’s name always says which chat
+                and when, and a chat file name is never included.
+            </small>
+            <button type="button" class="menu_button spendbook-export-button">Export JSON</button>
+        </section>
         <div class="spendbook-actions">
             <button type="button" class="menu_button spendbook-reset-chat">Reset this chat</button>
             <button type="button" class="menu_button spendbook-reset-alltime">Reset all time</button>
@@ -157,8 +175,10 @@
         </section>
         <small class="spendbook-privacy-note">
             Spendbook records token counts, cost and latency for chat-completion
-            requests made by this browser. It never stores prompt text, and an
-            export carries no chat identifiers unless you ask for them.
+            requests made by this browser. It never stores prompt text. An export
+            carries no chat file name; the download is named after the chat so you
+            can find it, and the chat’s name goes inside the file only if you ask
+            for it.
         </small>
     </div>
 </div>
