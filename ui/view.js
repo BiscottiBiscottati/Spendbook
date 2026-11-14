@@ -284,24 +284,26 @@ export function describeAllTime(allTime = {}, { hasPrices = false } = {}) {
 function buildConfigurationGroups(usage, prices) {
     const groups = Object.entries(usage.byConfiguration ?? {}).map(([key, group]) => {
         const counters = group.counters;
-        const requests = toCount(counters.requests);
+        const { requests, requestsLabel, detailLabel } = describeRequests(counters);
         const measuredPrompt = toCount(counters.promptTokens);
         const estimatedPrompt = toCount(counters.estimatedPromptTokens);
         const knownPrompt = measuredPrompt + estimatedPrompt;
-        const { requestsLabel, detailLabel } = describeRequests(counters);
         const cost = describeDollars(group.cost, prices?.currency);
 
         return {
             key,
             label: group.configuration ?? DEFAULT_CONFIGURATION_LABEL,
-            isDefault: group.configuration === null,
+            // `default` is the reserved name of the unlabelled group, so a host
+            // label spelled that way is the baseline no matter which arrived
+            // first.
+            isDefault: key === DEFAULT_CONFIGURATION_LABEL,
             requestsLabel,
             detailLabel,
             metrics: [
                 promptMetric(counters, { measuredPrompt, estimatedPrompt }),
                 tokenMetric('completion', 'Completion', counters.completionTokens, counters.completionTokenRequests),
                 hitRateMetric(counters, knownPrompt),
-                dollarsMetric('cost', 'Cost', group.cost, requests, cost),
+                dollarsMetric('cost', 'Cost', group.cost, requests, cost, { suppressEmptyCoverage: true }),
             ],
         };
     });
@@ -506,14 +508,18 @@ function tokenMetric(key, label, total, countedRequests) {
  * @param {string|null} value
  * @returns {object}
  */
-function dollarsMetric(key, label, figures, requests, value) {
+function dollarsMetric(key, label, figures, requests, value, { suppressEmptyCoverage = false } = {}) {
     const covered = figures.requests > 0;
     return {
         key,
         label,
         value: value ?? PLACEHOLDER,
         source: !covered ? 'unavailable' : (figures.estimatedRequests > 0 ? 'estimated' : 'measured'),
-        note: describeDollarCoverage(figures, requests),
+        // The comparison table hides the "for 0 of n requests" note a card has
+        // always carried: its value is already a placeholder.
+        note: suppressEmptyCoverage && figures.requests === 0
+            ? ''
+            : describeDollarCoverage(figures, requests),
     };
 }
 
@@ -577,9 +583,7 @@ function describeDollars(figures, currency) {
  * @returns {string}
  */
 function describeDollarCoverage(figures, requests) {
-    // A figure that covers no request is already drawn as a placeholder, so it
-    // must not also carry "for 0 of n requests" — the value says it all.
-    if (figures.requests === 0 || figures.requests >= requests) return '';
+    if (figures.requests >= requests) return '';
     return `for ${formatCount(figures.requests)} of ${formatCount(requests)} requests`;
 }
 

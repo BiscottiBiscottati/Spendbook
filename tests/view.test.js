@@ -843,6 +843,26 @@ describe('Spendbook view — configuration comparison', () => {
         expect(metric(group, 'cost').value).toBe('$0.00032520');
     });
 
+    it('treats a host label spelled default as the baseline, whichever row arrived first', () => {
+        const groupsFor = (records) => buildUsageView({ records, trackingEnabled: true, prices: ACME_PRICES })
+            .configurations.groups;
+
+        const labelledFirst = groupsFor([
+            record({ recordId: 'r-1', configuration: 'default' }),
+            record({ recordId: 'r-2', configuration: null }),
+        ]);
+        const unlabelledFirst = groupsFor([
+            record({ recordId: 'r-1', configuration: null }),
+            record({ recordId: 'r-2', configuration: 'default' }),
+        ]);
+
+        for (const groups of [labelledFirst, unlabelledFirst]) {
+            expect(groups).toHaveLength(1);
+            expect(groups[0]).toMatchObject({ label: 'default', isDefault: true });
+            expect(groups[0].requestsLabel).toBe('2 completed requests');
+        }
+    });
+
     it('shows no comparison at all when nothing was recorded', () => {
         const view = buildUsageView({ records: [], trackingEnabled: true });
 

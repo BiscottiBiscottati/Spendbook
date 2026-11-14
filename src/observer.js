@@ -218,7 +218,6 @@ function readIdentifier(sink, getter) {
     }
 }
 
-
 /**
  * Attribution is read through the sink so the wrapper installed by an earlier
  * module instance uses the reloaded instance's generation state.

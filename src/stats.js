@@ -245,11 +245,11 @@ export function normalizeUsageArchive(value) {
         // A persisted label goes through the one normaliser, and two entries
         // that describe one group once normalized are merged rather than one
         // silently overwriting the other.
-        if (!archive.byConfiguration[key]) {
-            archive.byConfiguration[key] = {
+        if (!Object.hasOwn(archive.byConfiguration, key)) {
+            defineConfigurationGroup(archive.byConfiguration, key, {
                 configuration,
                 accumulator: normalizeUsageAccumulator(entry.accumulator),
-            };
+            });
             continue;
         }
         archive.byConfiguration[key].accumulator = mergeUsageAccumulators(
@@ -287,8 +287,11 @@ export function addRecordToUsageArchive(archive, record) {
 
     const configuration = normalizeConfigurationLabel(record.configuration);
     const key = configuration ?? DEFAULT_CONFIGURATION_LABEL;
-    if (!archive.byConfiguration[key]) {
-        archive.byConfiguration[key] = { configuration, accumulator: createUsageAccumulator() };
+    if (!Object.hasOwn(archive.byConfiguration, key)) {
+        defineConfigurationGroup(archive.byConfiguration, key, {
+            configuration,
+            accumulator: createUsageAccumulator(),
+        });
     }
     addRecordToUsageAccumulator(archive.byConfiguration[key].accumulator, record);
 
@@ -405,7 +408,7 @@ export function sumUsageRecords({ records = [], archive = null, prices = null } 
         // overall total rather than inventing a group with a cost and no
         // requests.
         const configurationKey = bucket.configuration ?? DEFAULT_CONFIGURATION_LABEL;
-        if (folded.byConfiguration[configurationKey]) {
+        if (Object.hasOwn(folded.byConfiguration, configurationKey)) {
             targets.push(configurationSummaryFor(byConfiguration, bucket.configuration));
         }
         addFoldedDollars(bucket, prices, targets);
@@ -648,6 +651,24 @@ function normalizeModelBucket(entry) {
     bucket.reportedSaving = isNonNegativeNumber(entry.reportedSaving) ? entry.reportedSaving : 0;
     bucket.reportedSavingRequests = isNonNegativeNumber(entry.reportedSavingRequests) ? entry.reportedSavingRequests : 0;
     return bucket;
+}
+
+/**
+ * Defines one configuration group as an own property. A host label is free
+ * text, so a label spelled `__proto__` or `constructor` must become a group of
+ * its own rather than writing through an inherited member.
+ *
+ * @param {object} groups
+ * @param {string} key
+ * @param {object} group
+ */
+function defineConfigurationGroup(groups, key, group) {
+    Object.defineProperty(groups, key, {
+        value: group,
+        configurable: true,
+        enumerable: true,
+        writable: true,
+    });
 }
 
 /**

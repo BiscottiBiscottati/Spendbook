@@ -413,6 +413,24 @@ describe('Spendbook per-configuration sums', () => {
         });
     });
 
+    it('keeps a label that names an object member as its own group', () => {
+        const archive = createUsageArchive();
+        addRecordToUsageArchive(archive, record({ recordId: 'r-1', configuration: '__proto__' }));
+        addRecordToUsageArchive(archive, record({ recordId: 'r-2', configuration: 'constructor' }));
+
+        expect(Object.hasOwn(archive.byConfiguration, '__proto__')).toBe(true);
+        expect(Object.hasOwn(archive.byConfiguration, 'constructor')).toBe(true);
+        // A host label must never write through an inherited member.
+        expect(Object.prototype.accumulator).toBeUndefined();
+
+        const reloaded = normalizeUsageArchive(JSON.parse(JSON.stringify(archive)));
+        expect(Object.keys(reloaded.byConfiguration).sort()).toEqual(['__proto__', 'constructor']);
+
+        const totals = sumUsageRecords({ records: [], archive: reloaded, prices: ACME_PRICES });
+        expect(totals.byConfiguration['__proto__'].counters.requests).toBe(1);
+        expect(totals.byConfiguration.constructor.counters.requests).toBe(1);
+    });
+
     it('keeps the dollars of an archive that recorded no configuration counters in the total only', () => {
         const totals = sumUsageRecords({
             records: [],

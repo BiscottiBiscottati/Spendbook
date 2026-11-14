@@ -21,7 +21,7 @@ file-download and confirm callbacks injected. There is no import from the
 vector backends, the vector API or the provider layer anywhere in the feature.
 What it did have was reverse coupling — VectFox's own LLM helper called into the
 feature to label its requests — plus VectFox vocabulary baked in: a
-`vectfox-internal` origin, a ghost-only configuration snapshot, and a default
+internal-only origin, a ghost-only configuration snapshot, and a default
 price table seeded with VectFox's own model's cost.
 
 Two platform facts decide whether that coupling was worth keeping.
@@ -30,7 +30,7 @@ object or model id, the only per-message numbers are local tokenizer estimates
 behind an off-by-default setting, and ST never sends
 `stream_options.include_usage` — so a fetch tap is not a shortcut, it is the only
 browser-side place the number exists. And **the host's future
-`vectfox_llm_call_finished` event covers only VectFox's own calls**: story
+LLM-call-finished event covers only VectFox's own calls**: story
 replies, quiet generations and worker jobs are not VectFox's calls, so the
 observer stays independent either way. The integration surface would not shrink
 by waiting.

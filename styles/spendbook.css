@@ -133,7 +133,9 @@
 
 /* An estimated or unavailable figure reads quieter than a measured one. */
 .spendbook-metric[data-source="estimated"] dd,
-.spendbook-metric[data-source="unavailable"] dd {
+.spendbook-metric[data-source="unavailable"] dd,
+.spendbook-configuration-table td[data-source="estimated"],
+.spendbook-configuration-table td[data-source="unavailable"] {
     color: var(--SmartThemeEmColor);
 }
 
@@ -172,12 +174,6 @@
     font-size: 0.85em;
 }
 
-/* An estimated or unavailable figure reads quieter than a measured one, the
-   same rule the cards follow. */
-.spendbook-configuration-table td[data-source="estimated"],
-.spendbook-configuration-table td[data-source="unavailable"] {
-    color: var(--SmartThemeEmColor);
-}
 
 .spendbook-help {
     margin-top: 12px;

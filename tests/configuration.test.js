@@ -5,7 +5,7 @@
  * empty means no label at all.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import {
     CONFIGURATION_LABEL_MAX_LENGTH,
@@ -61,6 +61,10 @@ describe('Spendbook configuration label — set and clear', () => {
         setConfigurationLabel(null);
     });
 
+    afterEach(() => {
+        vi.unstubAllGlobals();
+    });
+
     it('starts with no label, which reads as the default group', () => {
         expect(getConfigurationLabel()).toBeNull();
         expect(DEFAULT_CONFIGURATION_LABEL).toBe('default');
@@ -73,12 +77,19 @@ describe('Spendbook configuration label — set and clear', () => {
 
     it('never becomes a saved setting', () => {
         const extensionSettings = {};
+        const storage = { getItem: vi.fn(() => null), setItem: vi.fn() };
+        vi.stubGlobal('localStorage', storage);
+
         setConfigurationLabel('after');
 
-        // Page-lifetime only: the settings namespace is untouched, so a reload
-        // starts with no label and no install inherits one.
-        expect(extensionSettings).toEqual({});
-        expect(readSpendbookSettings(extensionSettings)).not.toHaveProperty('configurationLabel');
+        // Page-lifetime only: the documented settings shape is unchanged and
+        // nothing was written to storage, so a reload starts with no label.
+        expect(readSpendbookSettings(extensionSettings)).toEqual({
+            trackingEnabled: false,
+            prices: { currency: 'USD', updated: '', entries: [] },
+            includeChatNames: false,
+        });
+        expect(storage.setItem).not.toHaveBeenCalled();
     });
 
     it('clears with null or an empty label', () => {
