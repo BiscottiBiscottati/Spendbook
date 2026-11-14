@@ -24,6 +24,8 @@ import { getConfigurationLabel } from './src/configuration.js';
 import { publishSpendbookHost } from './src/host.js';
 import { buildUsageExport, usageExportFileName } from './src/export.js';
 import { describeImportResult, importableLegacyPrices, readLegacyChat } from './src/importer.js';
+import { registerSpendbookCommands } from './src/commands.js';
+import { saveJsonFile } from './ui/download.js';
 import { mountSpendbookPanel } from './ui/panel.js';
 
 const EXTENSION_FOLDER = 'third-party/Spendbook';
@@ -107,22 +109,50 @@ function installObserver() {
 }
 
 /**
+ * The ledger and observer state both surfaces read: the open chat's rows, the
+ * observer's state and the aggregates. Each surface adds its own view inputs on
+ * top — the drawer its selected run and edited prices, the commands the saved
+ * price table — so a number is never drawn from one set of records and reported
+ * from another.
+ *
+ * @returns {object}
+ */
+function readSnapshot() {
+    return {
+        chatId: getChatId(),
+        records: ledger.recordsFor(getChatId()),
+        trackingEnabled: readSettings().trackingEnabled,
+        health: getUsageObserverHealth(),
+        retention: ledger.retentionFor(getChatId()),
+        allTime: ledger.allTimeForView(),
+        archive: ledger.archivedFor(getChatId()),
+        runs: ledger.runsFor(getChatId()),
+    };
+}
+
+/**
  * One file for a bug report: the open chat's records, its runs, the counters of
  * the rows the retention cap folded and the all-time totals. The export module
  * owns the published shape and the name opt-in, and the ledger owns the snapshot
  * shape; here they are only brought together, and the drawer does the saving.
  *
+ * `includeChatNames` is the caller's policy: the drawer passes the setting, and
+ * `/spendbook-export` passes false, so the command can never be the path a chat
+ * name leaves the browser.
+ *
+ * @param {object} [options]
+ * @param {boolean} [options.includeChatNames] Add the open chat's name; off by
+ *   default.
  * @returns {{fileName: string, content: string}}
  */
-function createChatExport() {
+function createChatExport({ includeChatNames = false } = {}) {
     const now = Date.now();
-    const settings = readSettings();
     const chatContext = getContext();
     const snapshot = ledger.exportSnapshotFor(getChatId());
     return {
-        fileName: usageExportFileName({ now, chatContext, includeChatNames: settings.includeChatNames }),
+        fileName: usageExportFileName({ now, chatContext, includeChatNames }),
         content: JSON.stringify(
-            buildUsageExport({ now, chatContext, includeChatNames: settings.includeChatNames, snapshot }),
+            buildUsageExport({ now, chatContext, includeChatNames, snapshot }),
             null,
             2,
         ),
@@ -185,16 +215,7 @@ async function mountSettingsDrawer() {
         container,
         html,
         settings: readSettings(),
-        getSnapshot: () => ({
-            chatId: getChatId(),
-            records: ledger.recordsFor(getChatId()),
-            trackingEnabled: readSettings().trackingEnabled,
-            health: getUsageObserverHealth(),
-            retention: ledger.retentionFor(getChatId()),
-            allTime: ledger.allTimeForView(),
-            archive: ledger.archivedFor(getChatId()),
-            runs: ledger.runsFor(getChatId()),
-        }),
+        getSnapshot: readSnapshot,
         onTrackingChange: (trackingEnabled) => {
             setTrackingEnabled(extension_settings, trackingEnabled);
             saveSettingsDebounced();
@@ -212,7 +233,7 @@ async function mountSettingsDrawer() {
         },
         onPricesChange: (prices) => persistPrices(prices),
         onStartRun: (label) => ledger.startRun({ chatId: getChatId(), label }),
-        onExport: () => createChatExport(),
+        onExport: () => createChatExport({ includeChatNames: readSettings().includeChatNames }),
         onImport: () => importLegacyHistory(),
         onIncludeChatNamesChange: (includeChatNames) => {
             setIncludeChatNames(extension_settings, includeChatNames);
@@ -255,6 +276,48 @@ function bindChatLifecycle() {
 
     globalThis.addEventListener('pagehide', () => ledger.flush());
 }
+
+/**
+ * Where a slash command's text is read. SillyTavern's toast is the only always-on
+ * surface for a command run from the chat bar, so the report is shown there,
+ * line by line; the message is escaped before its newlines become breaks.
+ *
+ * @param {string} text
+ */
+function showSpendbookText(text) {
+    const toastr = globalThis.toastr;
+    if (!toastr || typeof toastr.info !== 'function') return;
+
+    const html = String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .split('\n')
+        .join('<br>');
+    toastr.info(html, 'Spendbook', { escapeHtml: false, timeOut: 20000 });
+}
+
+/**
+ * Register `/spendbook`, `/spendbook-run` and `/spendbook-export`. The call
+ * starts here: SillyTavern's parser attributes a command by the extension folder
+ * in the registration call stack, so it lands on Spendbook. No callback here can
+ * change whether tracking is on — the toggle stays in the drawer.
+ */
+function registerSlashCommands() {
+    const context = getContext();
+    registerSpendbookCommands({
+        parser: context?.SlashCommandParser ?? null,
+        commandClass: context?.SlashCommand ?? null,
+        getSnapshot: () => ({ ...readSnapshot(), prices: readSettings().prices }),
+        getExport: (options) => createChatExport(options),
+        startRun: () => ledger.startRun({ chatId: getChatId() }),
+        refresh: refreshPanel,
+        saveFile: saveJsonFile,
+        notify: showSpendbookText,
+    });
+}
+
+registerSlashCommands();
 
 jQuery(async () => {
     try {

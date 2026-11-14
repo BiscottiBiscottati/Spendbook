@@ -9,21 +9,8 @@ import { describe, it, expect } from 'vitest';
 import { buildUsageView, describeAllTime } from '../ui/view.js';
 import { addRecordToUsageArchive, createUsageArchive } from '../src/stats.js';
 import { ACME_PRICES, ACME_PRICED_ROW } from './fixtures/prices.js';
+import { createAcmeRecord as record } from './fixtures/records.js';
 import { CHAT_RUNS } from './fixtures/runs.js';
-
-function record(overrides = {}) {
-    return {
-        recordId: 'r-1',
-        timestamp: 1_700_000_000_000,
-        origin: 'story',
-        label: null,
-        ...ACME_PRICED_ROW,
-        latencyMs: 820,
-        status: 'ok',
-        usageSource: 'measured',
-        ...overrides,
-    };
-}
 
 describe('Spendbook view — row cost', () => {
     it('shows the cost and saving the price table resolves', () => {

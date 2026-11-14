@@ -59,6 +59,20 @@ const SOURCE_LABELS = Object.freeze({
     unavailable: 'unavailable',
 });
 
+// The figures a one-line chat summary carries, in card order. A report is read
+// once, so an unavailable figure is left out rather than printed as a
+// placeholder.
+const REPORT_METRIC_KEYS = Object.freeze([
+    'prompt',
+    'cached',
+    'hitRate',
+    'completion',
+    'total',
+    'coverage',
+    'cost',
+    'saving',
+]);
+
 /**
  * Turns ledger records and observer state into the labels the drawer renders.
  *
@@ -265,6 +279,50 @@ export function describeAllTime(allTime = {}, { hasPrices = false } = {}) {
         estimatedPromptTokens,
         label: `All time: ${formatCountLabel(requests, 'completed request')}${stopped}, across ${formatCountLabel(chats, 'chat')}${measured}${estimated}.${costNote}`,
     };
+}
+
+/**
+ * The one-shot report `/spendbook` prints: tracking state, observer health, this
+ * chat's summary, the all-time summary and the current run. It is built from the
+ * same view as the drawer and over the whole open chat — the drawer's run filter
+ * is a drawer control — so a number cannot be read two ways. Nothing here
+ * mutates the ledger or the observer.
+ *
+ * @param {object} [snapshot] The drawer's snapshot: records, tracking state,
+ *   observer health, retention, all-time totals, archive, prices and runs.
+ * @returns {string}
+ */
+export function describeUsageReport(snapshot = {}) {
+    const view = buildUsageView(snapshot);
+
+    return [
+        `Tracking: ${snapshot.trackingEnabled === true ? 'on' : 'off'}.`,
+        view.health.label,
+        describeChatSummary(view.cards.find((card) => card.scope === 'all')),
+        view.allTime.label,
+        view.runs.currentLabel,
+    ].join('\n');
+}
+
+/**
+ * The overall card as one line. Every number keeps the metric's own value and
+ * source, so an unavailable figure is omitted instead of rendered as a
+ * confident zero.
+ *
+ * @param {object|undefined} card
+ * @returns {string}
+ */
+function describeChatSummary(card) {
+    if (!card) return 'This chat: no requests recorded yet.';
+
+    const parts = [card.requestsLabel];
+    for (const key of REPORT_METRIC_KEYS) {
+        const metric = card.metrics.find((entry) => entry.key === key);
+        if (!metric || metric.source === 'unavailable') continue;
+        parts.push(`${metric.label.toLowerCase()} ${metric.value}`);
+    }
+    if (card.detailLabel) parts.push(card.detailLabel);
+    return `This chat: ${parts.join(' · ')}.`;
 }
 
 /**

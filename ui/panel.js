@@ -11,12 +11,10 @@
 
 import { buildUsageView } from './view.js';
 import { mountPriceEditor } from './price-editor.js';
+import { saveJsonFile } from './download.js';
 
 const TRACKING_TOGGLE_ID = 'spendbook_tracking_enabled';
 const INCLUDE_CHAT_NAMES_ID = 'spendbook_include_chat_names';
-
-/** How long a generated file's object URL stays alive after the click. */
-const REVOKE_DELAY_MS = 1000;
 
 const RESET_CHAT_MESSAGE = 'Clear Spendbook’s usage rows for this chat? '
     + 'The all-time totals lose this chat’s contribution. This cannot be undone.';
@@ -233,40 +231,6 @@ function createOption(value, text) {
     option.value = value;
     option.textContent = text;
     return option;
-}
-
-/**
- * Saves a generated export through a Blob download. The object URL is revoked on
- * a later task rather than in the same tick, because the browser copies the blob
- * asynchronously and revoking immediately can cancel the download while the
- * drawer reports success.
- *
- * @param {string} fileName
- * @param {string} content
- */
-function saveJsonFile(fileName, content) {
-    if (typeof Blob !== 'function'
-        || typeof globalThis.URL?.createObjectURL !== 'function'
-        || typeof document === 'undefined') {
-        return;
-    }
-
-    const url = globalThis.URL.createObjectURL(new Blob([content], { type: 'application/json' }));
-
-    try {
-        const anchor = document.createElement('a');
-        anchor.href = url;
-        anchor.download = fileName;
-        document.body.appendChild(anchor);
-        anchor.click();
-        anchor.remove();
-    } catch (error) {
-        // Nothing will consume the URL now; do not wait out the grace period.
-        globalThis.URL.revokeObjectURL?.(url);
-        throw error;
-    }
-
-    setTimeout(() => globalThis.URL.revokeObjectURL?.(url), REVOKE_DELAY_MS);
 }
 
 /**
