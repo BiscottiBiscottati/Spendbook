@@ -38,7 +38,7 @@ describe('extension manifest', () => {
         expect(manifest.loading_order).toBe(50);
         expect(manifest.js).toBe('index.js');
         expect(manifest.css).toBe('styles/spendbook.css');
-        expect(manifest.version).toBe('1.0.0');
+        expect(manifest.version).toBe('1.0.1');
         expect(manifest.auto_update).toBe(true);
         expect(manifest.description).toBeTruthy();
         expect(manifest.author).toBeTruthy();

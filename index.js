@@ -167,7 +167,7 @@ function createChatExport({ includeChatNames = false } = {}) {
  * @param {import('./src/prices.js').UsagePriceTable} prices
  */
 function persistPrices(prices) {
-    setPriceTable(extensionSettings, prices);
+    setPriceTable(extension_settings, prices);
     saveSettingsDebounced();
 }
 
@@ -187,7 +187,7 @@ function importLegacyHistory() {
     const counts = legacy ? ledger.importChat(chatId, legacy) : { added: 0, alreadyPresent: 0 };
 
     const prices = importableLegacyPrices({
-        extensionSettings,
+        extensionSettings: extension_settings,
         currentPrices: readSettings().prices,
     });
     if (prices) {

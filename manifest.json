@@ -3,7 +3,7 @@
     "loading_order": 50,
     "js": "index.js",
     "css": "styles/spendbook.css",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "author": "BiscottiBiscottati",
     "description": "Token, cost and cache accounting for your chats: observes chat-completion requests and keeps a usage ledger.",
     "auto_update": true

@@ -1,6 +1,6 @@
 {
   "name": "spendbook",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "SillyTavern usage accounting: tokens, cost, cache hits and latency per chat.",
   "type": "module",

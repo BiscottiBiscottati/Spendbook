@@ -9,6 +9,15 @@ here.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-14
+
+### Fixed
+
+- The price table accepts edits again. Saving a price table read a settings
+  object that no longer exists, so every add, remove and rate change threw
+  before the table could repaint: "Add price row" looked dead. Importing an old
+  price table went through the same call and failed the same way.
+
 ## [1.0.0] - 2026-11-14
 
 First release: usage accounting as a standalone extension, no vector backend and

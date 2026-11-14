@@ -10,7 +10,7 @@ It is a standalone extension: no vector backend, no other extension, no server
 plugin, no build step and no runtime dependency. Tracking is **off by default**;
 nothing is observed until you turn it on.
 
-**Version 1.0.0** — changes are recorded in [CHANGELOG.md](CHANGELOG.md). The
+**Version 1.0.1** — changes are recorded in [CHANGELOG.md](CHANGELOG.md). The
 decision to ship usage accounting on its own is in
 [docs/adr/0001](docs/adr/0001-usage-accounting-leaves-vectfox.md).
 
